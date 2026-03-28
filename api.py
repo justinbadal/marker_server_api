@@ -75,11 +75,11 @@ async def convert_pdf(
         run_env["TORCH_DEVICE"] = "cuda"
         run_env["CUDA_VISIBLE_DEVICES"] = "0"
         
-        # Execute the marker system
-        result = subprocess.run(cmd, env=run_env, capture_output=True, text=True)
+        # Execute the marker system and let its logs dump dynamically directly to the Docker terminal
+        result = subprocess.run(cmd, env=run_env)
         
         if result.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"Conversion failed. stderr: {result.stderr}")
+            raise HTTPException(status_code=500, detail="Conversion failed. Please check the marker-api docker logs for the raw stack trace.")
             
         # Marker_single creates the output directory based on the unique filename
         # example: C:\coding\marker_output\<unique_name>
