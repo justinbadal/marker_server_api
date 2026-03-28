@@ -8,7 +8,7 @@ services:
       - "${MARKER_API_PORT:-8335}:8335"
     volumes:
       - ${HOST_OUTPUT_DIR:-C:/coding/marker_output}:/app/output
-      - C:\Users\Justin\.cache\huggingface:/root/.cache/huggingface
+      - C:\Users\Justin\.cache\:/root/.cache
     environment:
       - MARKER_OUTPUT_DIR=/app/output
       - HF_HOME=/root/.cache/huggingface
