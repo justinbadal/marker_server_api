@@ -289,7 +289,11 @@ export default function Home() {
     setJobFiles([]);
     const fd = new FormData();
     fd.append("file", file);
-    fd.append("options", JSON.stringify(opts));
+    Object.entries(opts).forEach(([k, v]) => {
+      if (v !== undefined && v !== null) {
+        fd.append(k, v.toString());
+      }
+    });
     try {
       const res = await fetch(`${apiUrl}/convert/async`, {
         method: "POST",

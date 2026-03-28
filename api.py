@@ -141,15 +141,30 @@ def background_conversion(job_id: str, original_base_name: str, pdf_path: str, j
 async def convert_async(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    options: str = Form(None),
+    page_range: str = Form(None, description="e.g. 0,5-10,20"),
+    force_ocr: bool = Form(False),
+    disable_image_extraction: bool = Form(False),
+    paginate_output: bool = Form(False),
+    keep_pageheader_in_output: bool = Form(False),
+    html_tables_in_markdown: bool = Form(False),
+    disable_links: bool = Form(False),
+    strip_existing_ocr: bool = Form(False),
+    max_concurrency: int = Form(4),
+    highres_image_dpi: int = Form(192),
     token: str = Depends(verify_token)
 ):
-    extras = {}
-    if options:
-        try:
-            extras = json.loads(options)
-        except:
-            pass
+    extras = {
+        "page_range": page_range,
+        "force_ocr": force_ocr,
+        "disable_image_extraction": disable_image_extraction,
+        "paginate_output": paginate_output,
+        "keep_pageheader_in_output": keep_pageheader_in_output,
+        "html_tables_in_markdown": html_tables_in_markdown,
+        "disable_links": disable_links,
+        "strip_existing_ocr": strip_existing_ocr,
+        "max_concurrency": max_concurrency,
+        "highres_image_dpi": highres_image_dpi,
+    }
 
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
