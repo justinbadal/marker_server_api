@@ -8,6 +8,7 @@ import json
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
 
 # Configuration
 API_PORT = int(os.getenv("MARKER_API_PORT", "8335"))
@@ -19,6 +20,15 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:8020/v1")
 os.makedirs(MARKER_OUTPUT_DIR, exist_ok=True)
 
 app = FastAPI(title="Marker PDF Conversion API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 security = HTTPBearer()
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
