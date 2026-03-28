@@ -70,7 +70,7 @@ function MarkdownModal({ markdown, onClose }: { markdown: string; onClose: () =>
             </Button>
           </div>
         </div>
-        <ScrollArea className="flex-1 p-5">
+        <div className="flex-1 overflow-y-auto p-5 custom-scrollbar">
           {rendered ? (
             <div className="prose prose-invert prose-zinc max-w-none text-sm">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
@@ -78,7 +78,7 @@ function MarkdownModal({ markdown, onClose }: { markdown: string; onClose: () =>
           ) : (
             <pre className="font-mono text-xs text-zinc-300 whitespace-pre-wrap">{markdown}</pre>
           )}
-        </ScrollArea>
+        </div>
       </div>
     </div>
   );
