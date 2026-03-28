@@ -86,6 +86,16 @@ def get_run_env():
     run_env = os.environ.copy()
     run_env["TORCH_DEVICE"] = "cuda"
     run_env["CUDA_VISIBLE_DEVICES"] = "0"
+    
+    # AGGRESSIVE CACHE REDIRECTION
+    # Point everything to our persistent /root/.cache/huggingface volume
+    cache_base = "/root/.cache/huggingface"
+    run_env["HF_HOME"] = cache_base
+    run_env["HF_HUB_CACHE"] = os.path.join(cache_base, "hub")
+    run_env["TRANSFORMERS_CACHE"] = os.path.join(cache_base, "hub")
+    run_env["XDG_CACHE_HOME"] = "/root/.cache"
+    run_env["TORCH_HOME"] = "/root/.cache/torch"
+    run_env["SURYA_CACHE_DIR"] = os.path.join(cache_base, "surya")
     return run_env
 
 def update_job_status(job_dir: str, status: str, error: str = None):
