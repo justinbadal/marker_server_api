@@ -38,5 +38,7 @@ services:
       - WATCHTOWER_POLL_INTERVAL=300
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_INCLUDE_RESTARTING=true
+      # Force modern API version for Docker Desktop 26+ compatibility
+      - DOCKER_API_VERSION=1.44
     # Ensure it only watches the marker-api and itself
     command: marker-api watchtower
