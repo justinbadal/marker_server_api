@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  marker-api:
+    image: ghcr.io/justinbadal/marker_server_api:latest
+    build: .
+    container_name: marker-api
+    restart: unless-stopped
+    ports:
+      - "8335:8335"
+    volumes:
+      - C:\coding\marker_output:/app/output
+    environment:
+      - MARKER_API_PORT=8335
+      - MARKER_API_TOKEN=my-secret-token
+      - MARKER_OUTPUT_DIR=/app/output
+      # Use host.docker.internal to access LLM on Windows host
+      - OPENAI_BASE_URL=http://host.docker.internal:8020/v1
+    # REQUIRED on Windows/WSL2 or Linux for GPU passthrough:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Watchtower automatically updates your running containers
+  # whenever a new image is pushed to the GitHub Container Registry.
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # Check for new images every 5 minutes (300 seconds)
+      - WATCHTOWER_POLL_INTERVAL=300
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_INCLUDE_RESTARTING=true
+    # Ensure it only watches the marker-api and itself
+    command: marker-api watchtower
