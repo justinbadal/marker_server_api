@@ -93,6 +93,7 @@ def get_run_env():
     run_env["HF_HOME"] = cache_base
     run_env["HF_HUB_CACHE"] = os.path.join(cache_base, "hub")
     run_env["TRANSFORMERS_CACHE"] = os.path.join(cache_base, "hub")
+    run_env["HF_HUB_DISABLE_SYMLINKS"] = "1"
     run_env["XDG_CACHE_HOME"] = "/root/.cache"
     run_env["TORCH_HOME"] = "/root/.cache/torch"
     run_env["SURYA_CACHE_DIR"] = os.path.join(cache_base, "surya")
