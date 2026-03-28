@@ -48,7 +48,7 @@ async def health_check():
     }
 
 def get_marker_cmd(pdf_path: str, output_dir: str, extras: dict = None):
-    return [
+    cmd = [
         "marker_single",
         pdf_path,
         "--output_dir", output_dir,
@@ -66,8 +66,7 @@ def get_marker_cmd(pdf_path: str, output_dir: str, extras: dict = None):
         "--table_rec_batch_size", "8",
         "--max_concurrency", "4",
         "--redo_inline_math",
-        "--keep_pagefooter_in_output",
-        "--debug"
+        "--keep_pagefooter_in_output"
     ]
     # Append any extra options from the UI
     if extras:
