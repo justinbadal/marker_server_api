@@ -8,11 +8,13 @@ services:
       - "${MARKER_API_PORT:-8335}:8335"
     volumes:
       - ${HOST_OUTPUT_DIR:-C:/coding/marker_output}:/app/output
-      - ./model_cache:/root/.cache/huggingface
+      - C:\Users\Justin\.cache\huggingface:/root/.cache/huggingface
     environment:
       - MARKER_OUTPUT_DIR=/app/output
       - HF_HOME=/root/.cache/huggingface
       - HF_HUB_DISABLE_SYMLINKS=1
+      - HF_HUB_CACHE=/root/.cache/huggingface/hub
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface/hub
     env_file:
       - .env
     # REQUIRED on Windows/WSL2 or Linux for GPU passthrough:
@@ -22,7 +24,7 @@ services:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu]
+              capabilities: [ gpu ]
 
   marker-webui:
     image: ghcr.io/justinbadal/marker_webui:latest
