@@ -8,10 +8,11 @@ services:
       - "${MARKER_API_PORT:-8335}:8335"
     volumes:
       - ${HOST_OUTPUT_DIR:-C:/coding/marker_output}:/app/output
-      - ${HOST_MODEL_CACHE_DIR:-C:/coding/marker_models}:/root/.cache/huggingface
+      - ./model_cache:/root/.cache/huggingface
     environment:
       - MARKER_OUTPUT_DIR=/app/output
       - HF_HOME=/root/.cache/huggingface
+      - HF_HUB_DISABLE_SYMLINKS=1
     env_file:
       - .env
     # REQUIRED on Windows/WSL2 or Linux for GPU passthrough:
