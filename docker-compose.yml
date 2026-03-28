@@ -5,7 +5,7 @@ services:
     container_name: marker-api
     restart: unless-stopped
     ports:
-      - "${MARKER_API_PORT:-8335}:${MARKER_API_PORT:-8335}"
+      - "${MARKER_API_PORT/:-8335}:${MARKER_API_PORT:-8335}"
     volumes:
       - ${HOST_OUTPUT_DIR:-C:/coding/marker_output}:/app/output
     environment:
