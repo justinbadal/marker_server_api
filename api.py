@@ -5,7 +5,7 @@ import shutil
 import tempfile
 import uuid
 import json
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,7 +36,18 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         raise HTTPException(status_code=401, detail="Invalid token")
     return credentials.credentials
 
-def get_marker_cmd(pdf_path: str, output_dir: str):
+@app.get("/health")
+async def health_check():
+    import shutil as _shutil
+    marker_available = bool(_shutil.which("marker_single"))
+    return {
+        "status": "ok",
+        "marker_available": marker_available,
+        "output_dir": MARKER_OUTPUT_DIR,
+        "llm_url": OPENAI_BASE_URL,
+    }
+
+def get_marker_cmd(pdf_path: str, output_dir: str, extras: dict = None):
     return [
         "marker_single",
         pdf_path,
@@ -58,6 +69,19 @@ def get_marker_cmd(pdf_path: str, output_dir: str):
         "--keep_pagefooter_in_output",
         "--debug"
     ]
+    # Append any extra options from the UI
+    if extras:
+        if extras.get("page_range"): cmd += ["--page_range", extras["page_range"]]
+        if extras.get("force_ocr"): cmd += ["--force_ocr"]
+        if extras.get("disable_image_extraction"): cmd += ["--disable_image_extraction"]
+        if extras.get("paginate_output"): cmd += ["--paginate_output"]
+        if extras.get("keep_pageheader_in_output"): cmd += ["--keep_pageheader_in_output"]
+        if extras.get("html_tables_in_markdown"): cmd += ["--html_tables_in_markdown"]
+        if extras.get("disable_links"): cmd += ["--disable_links"]
+        if extras.get("strip_existing_ocr"): cmd += ["--strip_existing_ocr"]
+        if extras.get("max_concurrency"): cmd += ["--max_concurrency", str(extras["max_concurrency"])]
+        if extras.get("highres_image_dpi"): cmd += ["--highres_image_dpi", str(extras["highres_image_dpi"])]
+    return cmd
 
 def get_run_env():
     run_env = os.environ.copy()
@@ -73,8 +97,8 @@ def update_job_status(job_dir: str, status: str, error: str = None):
     with open(status_file, "w") as f:
         json.dump(data, f)
 
-def background_conversion(job_id: str, original_base_name: str, pdf_path: str, job_dir: str):
-    cmd = get_marker_cmd(pdf_path, MARKER_OUTPUT_DIR)
+def background_conversion(job_id: str, original_base_name: str, pdf_path: str, job_dir: str, extras: dict = None):
+    cmd = get_marker_cmd(pdf_path, MARKER_OUTPUT_DIR, extras)
     env = get_run_env()
     log_file_path = os.path.join(job_dir, "output.log")
     
@@ -107,8 +131,16 @@ def background_conversion(job_id: str, original_base_name: str, pdf_path: str, j
 async def convert_async(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    options: str = Form(None),
     token: str = Depends(verify_token)
 ):
+    extras = {}
+    if options:
+        try:
+            extras = json.loads(options)
+        except:
+            pass
+
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
         
@@ -127,7 +159,7 @@ async def convert_async(
     with open(os.path.join(job_dir, "output.log"), "w") as f:
         pass
         
-    background_tasks.add_task(background_conversion, job_id, original_base_name, pdf_path, job_dir)
+    background_tasks.add_task(background_conversion, job_id, original_base_name, pdf_path, job_dir, extras)
     
     return {"job_id": unique_name, "status": "pending", "message": "Conversion started. Poll /status/{job_id}"}
 
@@ -178,6 +210,22 @@ async def download_result(job_id: str, token: str = Depends(verify_token)):
         raise HTTPException(status_code=500, detail="Generated markdown file not found.")
         
     return FileResponse(path=md_file_path, filename=os.path.basename(md_file_path), media_type="text/markdown")
+
+
+@app.get("/files/{job_id}")
+async def list_job_files(job_id: str, token: str = Depends(verify_token)):
+    job_dir = os.path.join(MARKER_OUTPUT_DIR, job_id)
+    if not os.path.exists(job_dir):
+        raise HTTPException(status_code=404, detail="Job not found.")
+    files = []
+    for fname in sorted(os.listdir(job_dir)):
+        # Skip internal tracking files
+        if fname in ("status.json", "output.log"):
+            continue
+        fpath = os.path.join(job_dir, fname)
+        fsize = os.path.getsize(fpath) if os.path.isfile(fpath) else 0
+        files.append({"name": fname, "size": fsize})
+    return {"job_id": job_id, "files": files}
 
 
 # ---------------------------------------------------------
