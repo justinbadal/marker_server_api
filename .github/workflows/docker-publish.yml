@@ -1,4 +1,4 @@
-name: Publish Docker Image to GHCR
+name: Publish Docker Images to GHCR
 
 on:
   push:
@@ -7,14 +7,24 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_OWNER: ${{ github.repository_owner }}
 
 jobs:
-  build-and-push-image:
+  build-and-push-images:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: marker_server_api
+            context: .
+            dockerfile: ./Dockerfile
+          - name: marker_webui
+            context: ./webui
+            dockerfile: ./webui/Dockerfile
 
     steps:
       - name: Checkout repository
@@ -31,7 +41,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ matrix.image.name }}
           tags: |
             type=sha,format=long
             type=raw,value=latest
@@ -40,7 +50,8 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          context: .
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.dockerfile }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
