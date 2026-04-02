@@ -225,7 +225,7 @@ function OptionsPanel({ opts, setOpts }: { opts: Options; setOpts: (o: Options) 
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function Home() {
-  const [apiUrl, setApiUrl] = useState("http://localhost:8335");
+  const [apiUrl, setApiUrl] = useState("http://localhost:8336");
   const [apiKey, setApiKey] = useState("my-secret-token");
   const [file, setFile] = useState<File | null>(null);
   const [opts, setOpts] = useState<Options>(DEFAULT_OPTIONS);

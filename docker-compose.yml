@@ -5,10 +5,12 @@ services:
     container_name: marker-api
     restart: unless-stopped
     ports:
-      - "${MARKER_API_PORT:-8335}:8335"
+      - "${MARKER_API_PORT:-8336}:8336"
     volumes:
       - ${HOST_OUTPUT_DIR:-C:/coding/marker_output}:/app/output
       - C:\Users\Justin\.cache\:/root/.cache
+      - ${SYNOLOGY_SSH_KEY_SOURCE:-C:/coding/marker_server_api_synology_key}:/run/secrets/marker_server_api_synology_key:ro
+      - ${SYNOLOGY_SSH_KNOWN_HOSTS_SOURCE:-C:/coding/marker_server_api_synology_known_hosts}:/run/secrets/marker_server_api_synology_known_hosts:ro
     environment:
       - MARKER_OUTPUT_DIR=/app/output
       - HF_HOME=/root/.cache/huggingface
@@ -32,7 +34,7 @@ services:
     container_name: marker-webui
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3005:3000"
     depends_on:
       - marker-api
     env_file:

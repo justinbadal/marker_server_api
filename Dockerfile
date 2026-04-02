@@ -24,7 +24,7 @@ COPY api.py .
 
 # Setup environment defaults targeted towards Docker contexts
 ENV MARKER_OUTPUT_DIR=/app/output
-ENV MARKER_API_PORT=8335
+ENV MARKER_API_PORT=8336
 ENV MARKER_API_TOKEN=my-secret-token
 
 # Use host.docker.internal to interface with the local LLM running on the host machine
@@ -33,6 +33,6 @@ ENV OPENAI_BASE_URL=http://host.docker.internal:8020/v1
 # Ensure the output dir permissions are set to accept mounted volumes well
 RUN mkdir -p /app/output && chmod 777 /app/output
 
-EXPOSE 8335
+EXPOSE 8336
 
 CMD ["python", "api.py"]

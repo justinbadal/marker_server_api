@@ -5,16 +5,36 @@ import shutil
 import tempfile
 import uuid
 import json
+import re
+from pathlib import Path, PurePosixPath
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+import paramiko
 
 # Configuration
-API_PORT = int(os.getenv("MARKER_API_PORT", "8335"))
+API_PORT = int(os.getenv("MARKER_API_PORT", "8336"))
 MARKER_OUTPUT_DIR = os.getenv("MARKER_OUTPUT_DIR", r"C:\coding\marker_output")
 API_BEARER_TOKEN = os.getenv("MARKER_API_TOKEN", "my-secret-token")  # Change token in production!
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:8020/v1")
+SYNOLOGY_SSH_HOST = os.getenv("SYNOLOGY_SSH_HOST", "")
+SYNOLOGY_SSH_PORT = int(os.getenv("SYNOLOGY_SSH_PORT", "22"))
+SYNOLOGY_SSH_USER = os.getenv("SYNOLOGY_SSH_USER", "")
+SYNOLOGY_SSH_KEY_PATH = os.getenv("SYNOLOGY_SSH_KEY_PATH", "")
+SYNOLOGY_SSH_KEY_PASSPHRASE = os.getenv("SYNOLOGY_SSH_KEY_PASSPHRASE")
+SYNOLOGY_SSH_REMOTE_BASE_PATH = os.getenv("SYNOLOGY_SSH_REMOTE_BASE_PATH", "/homes/justin/RAG/Marker")
+SYNOLOGY_SSH_KNOWN_HOSTS_PATH = os.getenv("SYNOLOGY_SSH_KNOWN_HOSTS_PATH", "")
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+SYNOLOGY_SSH_AUTO_ADD_HOST_KEY = env_flag("SYNOLOGY_SSH_AUTO_ADD_HOST_KEY", False)
 
 # Ensure the base output directory exists on startup
 os.makedirs(MARKER_OUTPUT_DIR, exist_ok=True)
@@ -45,7 +65,140 @@ async def health_check():
         "marker_available": marker_available,
         "output_dir": MARKER_OUTPUT_DIR,
         "llm_url": OPENAI_BASE_URL,
+        "synology_ssh_enabled": synology_ssh_enabled(),
+        "synology_ssh_host": SYNOLOGY_SSH_HOST,
+        "synology_ssh_port": SYNOLOGY_SSH_PORT,
+        "synology_ssh_remote_base_path": SYNOLOGY_SSH_REMOTE_BASE_PATH,
     }
+
+
+def synology_ssh_enabled() -> bool:
+    required = [SYNOLOGY_SSH_HOST, SYNOLOGY_SSH_USER, SYNOLOGY_SSH_KEY_PATH]
+    return all(required)
+
+
+def sanitize_folder_name(name: str) -> str:
+    safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", name).strip().strip(".")
+    return safe_name or "untitled"
+
+
+def build_synology_target_dir(original_base_name: str) -> str:
+    base = SYNOLOGY_SSH_REMOTE_BASE_PATH.rstrip("/")
+    folder_name = sanitize_folder_name(original_base_name)
+    return f"{base}/{folder_name}"
+
+
+def append_job_log(log_file_path: str, message: str):
+    print(message)
+    with open(log_file_path, "a", encoding="utf-8") as log_file:
+        log_file.write(f"{message}\n")
+
+
+def collect_generated_files(job_dir: str) -> list[str]:
+    internal_names = {"status.json", "output.log"}
+    generated_files = []
+    for path in sorted(Path(job_dir).rglob("*")):
+        if not path.is_file():
+            continue
+        if path.name in internal_names:
+            continue
+        if path.suffix.lower() == ".pdf":
+            continue
+        generated_files.append(str(path))
+    return generated_files
+
+
+def create_ssh_client() -> paramiko.SSHClient:
+    ssh = paramiko.SSHClient()
+    if SYNOLOGY_SSH_KNOWN_HOSTS_PATH:
+        ssh.load_host_keys(SYNOLOGY_SSH_KNOWN_HOSTS_PATH)
+    else:
+        ssh.load_system_host_keys()
+
+    if SYNOLOGY_SSH_AUTO_ADD_HOST_KEY:
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    else:
+        ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
+
+    ssh.connect(
+        hostname=SYNOLOGY_SSH_HOST,
+        port=SYNOLOGY_SSH_PORT,
+        username=SYNOLOGY_SSH_USER,
+        key_filename=SYNOLOGY_SSH_KEY_PATH,
+        passphrase=SYNOLOGY_SSH_KEY_PASSPHRASE,
+        look_for_keys=False,
+        allow_agent=False,
+        timeout=30,
+    )
+    return ssh
+
+
+def ensure_remote_dir(sftp: paramiko.SFTPClient, remote_dir: str):
+    current = PurePosixPath("/")
+    for part in PurePosixPath(remote_dir).parts[1:]:
+        current = current / part
+        try:
+            sftp.stat(current.as_posix())
+        except FileNotFoundError:
+            sftp.mkdir(current.as_posix())
+
+
+def upload_generated_files_to_synology(job_dir: str, original_base_name: str, log_file_path: str) -> dict:
+    if not synology_ssh_enabled():
+        append_job_log(log_file_path, "[nas] Synology SSH upload skipped: integration is not fully configured.")
+        return {"enabled": False, "status": "skipped", "uploaded_files": [], "target_dir": None}
+
+    target_dir = build_synology_target_dir(original_base_name)
+    generated_files = collect_generated_files(job_dir)
+    if not generated_files:
+        append_job_log(log_file_path, "[nas] No generated files found to upload.")
+        return {"enabled": True, "status": "skipped", "uploaded_files": [], "target_dir": target_dir}
+
+    uploaded_files = []
+    ssh = None
+    sftp = None
+    try:
+        append_job_log(log_file_path, f"[nas] Connecting to Synology over SSH at {SYNOLOGY_SSH_HOST}:{SYNOLOGY_SSH_PORT}")
+        ssh = create_ssh_client()
+        sftp = ssh.open_sftp()
+        ensure_remote_dir(sftp, target_dir)
+        append_job_log(log_file_path, f"[nas] Upload target: {target_dir}")
+
+        for local_file_path in generated_files:
+            relative_path = Path(local_file_path).relative_to(job_dir).as_posix()
+            remote_file_path = PurePosixPath(target_dir) / PurePosixPath(relative_path)
+            ensure_remote_dir(sftp, remote_file_path.parent.as_posix())
+            append_job_log(log_file_path, f"[nas] Uploading {relative_path} -> {remote_file_path.as_posix()}")
+            sftp.put(local_file_path, remote_file_path.as_posix())
+            uploaded_files.append(relative_path)
+
+        append_job_log(log_file_path, f"[nas] Uploaded {len(uploaded_files)} file(s) to Synology over SSH.")
+        return {
+            "enabled": True,
+            "status": "uploaded",
+            "uploaded_files": uploaded_files,
+            "target_dir": target_dir,
+        }
+    except Exception as exc:
+        append_job_log(log_file_path, f"[nas] Upload failed: {exc}")
+        return {
+            "enabled": True,
+            "status": "failed",
+            "error": str(exc),
+            "uploaded_files": uploaded_files,
+            "target_dir": target_dir,
+        }
+    finally:
+        try:
+            if sftp is not None:
+                sftp.close()
+        except Exception:
+            pass
+        try:
+            if ssh is not None:
+                ssh.close()
+        except Exception:
+            pass
 
 def get_marker_cmd(pdf_path: str, output_dir: str, extras: dict = None):
     cmd = [
@@ -107,6 +260,17 @@ def update_job_status(job_dir: str, status: str, error: str = None):
     with open(status_file, "w") as f:
         json.dump(data, f)
 
+
+def write_job_metadata(job_dir: str, **fields):
+    status_file = os.path.join(job_dir, "status.json")
+    existing = {}
+    if os.path.exists(status_file):
+        with open(status_file, "r", encoding="utf-8") as f:
+            existing = json.load(f)
+    existing.update(fields)
+    with open(status_file, "w", encoding="utf-8") as f:
+        json.dump(existing, f)
+
 def background_conversion(job_id: str, original_base_name: str, pdf_path: str, job_dir: str, extras: dict = None):
     cmd = get_marker_cmd(pdf_path, MARKER_OUTPUT_DIR, extras)
     env = get_run_env()
@@ -128,6 +292,8 @@ def background_conversion(job_id: str, original_base_name: str, pdf_path: str, j
             update_job_status(job_dir, "failed", f"Process exited with code {process.returncode}")
         else:
             update_job_status(job_dir, "completed")
+            nas_upload = upload_generated_files_to_synology(job_dir, original_base_name, log_file_path)
+            write_job_metadata(job_dir, nas_upload=nas_upload)
             
     except Exception as e:
         update_job_status(job_dir, "failed", str(e))
@@ -305,7 +471,12 @@ async def convert_stream(
         else:
             hit_output_dir = os.path.join(MARKER_OUTPUT_DIR, unique_name)
             md_file_path = None
+            nas_upload = None
             if os.path.exists(hit_output_dir):
+                log_file_path = os.path.join(hit_output_dir, "output.log")
+                with open(log_file_path, "a", encoding="utf-8"):
+                    pass
+                nas_upload = upload_generated_files_to_synology(hit_output_dir, original_base_name, log_file_path)
                 for file_name in os.listdir(hit_output_dir):
                     if file_name.endswith(".md"):
                         md_file_path = os.path.join(hit_output_dir, file_name)
@@ -314,7 +485,7 @@ async def convert_stream(
             if md_file_path and os.path.exists(md_file_path):
                 with open(md_file_path, "r", encoding="utf-8") as rf:
                     content = rf.read()
-                yield f"data: {json.dumps({'status': 'completed', 'markdown': content})}\n\n"
+                yield f"data: {json.dumps({'status': 'completed', 'markdown': content, 'nas_upload': nas_upload})}\n\n"
             else:
                 yield f"data: {json.dumps({'status': 'failed', 'error': 'Markdown file missing'})}\n\n"
                 
@@ -354,6 +525,11 @@ async def convert_pdf(
             raise HTTPException(status_code=500, detail="Conversion failed. Check docker logs.")
             
         hit_output_dir = os.path.join(MARKER_OUTPUT_DIR, unique_name)
+        log_file_path = os.path.join(hit_output_dir, "output.log")
+        if os.path.exists(hit_output_dir):
+            with open(log_file_path, "a", encoding="utf-8"):
+                pass
+            upload_generated_files_to_synology(hit_output_dir, original_base_name, log_file_path)
         
         md_file_path = None
         if os.path.exists(hit_output_dir):
