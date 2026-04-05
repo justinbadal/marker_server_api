@@ -18,6 +18,7 @@ API_PORT = int(os.getenv("MARKER_API_PORT", "8336"))
 MARKER_OUTPUT_DIR = os.getenv("MARKER_OUTPUT_DIR", r"C:\coding\marker_output")
 API_BEARER_TOKEN = os.getenv("MARKER_API_TOKEN", "my-secret-token")  # Change token in production!
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:8020/v1")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "openai/gpt-oss-20b")
 SYNOLOGY_SSH_HOST = os.getenv("SYNOLOGY_SSH_HOST", "")
 SYNOLOGY_SSH_PORT = int(os.getenv("SYNOLOGY_SSH_PORT", "22"))
 SYNOLOGY_SSH_USER = os.getenv("SYNOLOGY_SSH_USER", "")
@@ -65,6 +66,7 @@ async def health_check():
         "marker_available": marker_available,
         "output_dir": MARKER_OUTPUT_DIR,
         "llm_url": OPENAI_BASE_URL,
+        "llm_models": [OPENAI_MODEL],
         "synology_ssh_enabled": synology_ssh_enabled(),
         "synology_ssh_host": SYNOLOGY_SSH_HOST,
         "synology_ssh_port": SYNOLOGY_SSH_PORT,
@@ -248,7 +250,7 @@ def get_marker_cmd(pdf_path: str, output_dir: str, extras: dict = None):
         "--output_format", "markdown",
         "--use_llm",
         "--llm_service", "marker.services.openai.OpenAIService",
-        "--openai_model", "openai/gpt-oss-20b",
+        "--openai_model", OPENAI_MODEL,
         "--openai_base_url", OPENAI_BASE_URL,
         "--openai_api_key", "SK-1234567890HERPDERP",
         "--openai_image_format", "png",

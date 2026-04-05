@@ -108,7 +108,7 @@ function MarkdownModal({ markdown, onClose }: { markdown: string; onClose: () =>
 
 // ─── Status Bar ───────────────────────────────────────────────────────────────
 function StatusBar({ apiUrl, apiKey }: { apiUrl: string; apiKey: string }) {
-  const [health, setHealth] = useState<{ status: string; marker_available: boolean; llm_url: string } | null>(null);
+  const [health, setHealth] = useState<{ status: string; marker_available: boolean; llm_url: string; llm_models?: string[] } | null>(null);
   const [loading, setLoading] = useState(true);
 
   const check = useCallback(async () => {
@@ -132,6 +132,9 @@ function StatusBar({ apiUrl, apiKey }: { apiUrl: string; apiKey: string }) {
   }, [check]);
 
   const online = health?.status === "ok";
+  const modelLabel = health?.llm_models?.length
+    ? health.llm_models.join(", ")
+    : "unknown";
   return (
     <div className="flex items-center gap-4 px-4 py-2 bg-zinc-900/60 border border-zinc-800 rounded-lg text-xs font-mono">
       <div className="flex items-center gap-2">
@@ -150,7 +153,7 @@ function StatusBar({ apiUrl, apiKey }: { apiUrl: string; apiKey: string }) {
           <span className="text-zinc-700">|</span>
           <span className="text-zinc-500">marker_single: {health?.marker_available ? <span className="text-green-400">ready</span> : <span className="text-red-400">missing</span>}</span>
           <span className="text-zinc-700">|</span>
-          <span className="text-zinc-600 truncate max-w-xs">LLM: {health?.llm_url}</span>
+          <span className="text-zinc-600 truncate max-w-xs">Models: {modelLabel}</span>
         </>
       )}
       <button onClick={check} className="ml-auto text-zinc-600 hover:text-zinc-400 transition-colors">↻ refresh</button>
