@@ -8,7 +8,7 @@ services:
       - "${MARKER_API_PORT:-8336}:8336"
     volumes:
       - ${HOST_OUTPUT_DIR:-C:/coding/marker_output}:/app/output
-      - C:\Users\Justin\.cache\:/root/.cache
+      - ${HOST_MODEL_CACHE_DIR:-C:/Users/Justin/.cache}:/root/.cache
       - ${SYNOLOGY_SSH_KEY_SOURCE:-C:/coding/marker_server_api_synology_key}:/run/secrets/marker_server_api_synology_key:ro
       - ${SYNOLOGY_SSH_KNOWN_HOSTS_SOURCE:-C:/coding/marker_server_api_synology_known_hosts}:/run/secrets/marker_server_api_synology_known_hosts:ro
     environment:
@@ -30,15 +30,30 @@ services:
 
   marker-webui:
     image: ghcr.io/justinbadal/marker_webui:latest
-    build: ./webui
+    build:
+      context: ./webui
+      args:
+        NEXT_PUBLIC_MARKER_API_BASE_URL: /api
     container_name: marker-webui
     restart: unless-stopped
     ports:
-      - "3005:3000"
+      - "${MARKER_WEBUI_PORT:-3005}:3000"
     depends_on:
       - marker-api
     env_file:
       - .env
+
+  marker-proxy:
+    image: caddy:2
+    container_name: marker-proxy
+    restart: unless-stopped
+    ports:
+      - "${MARKER_PROXY_PORT:-8048}:80"
+    depends_on:
+      - marker-api
+      - marker-webui
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
 
   # Watchtower automatically updates your running containers
   # whenever a new image is pushed to the GitHub Container Registry.
@@ -55,5 +70,5 @@ services:
       - WATCHTOWER_INCLUDE_RESTARTING=true
       # Force modern API version for Docker Desktop 26+ compatibility
       - DOCKER_API_VERSION=1.44
-    # Ensure it only watches the marker-api, marker-webui and itself
-    command: marker-api marker-webui watchtower
+    # Ensure it only watches the marker-api, marker-webui, marker-proxy and itself
+    command: marker-api marker-webui marker-proxy watchtower

@@ -1,0 +1,11 @@
+:80 {
+    encode gzip
+
+    handle_path /api/* {
+        reverse_proxy marker-api:8336
+    }
+
+    handle {
+        reverse_proxy marker-webui:3000
+    }
+}

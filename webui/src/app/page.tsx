@@ -13,6 +13,8 @@ import {
   Activity, FileText, ChevronDown, ChevronUp, Code, Eye, X, File,
 } from "lucide-react";
 
+const DEFAULT_API_URL = process.env.NEXT_PUBLIC_MARKER_API_BASE_URL || "/api";
+
 // ─── types ───────────────────────────────────────────────────────────────────
 interface JobFile { name: string; size: number; }
 interface Options {
@@ -37,6 +39,18 @@ function fmt(bytes: number) {
 // ─── Markdown Modal ───────────────────────────────────────────────────────────
 function MarkdownModal({ markdown, onClose }: { markdown: string; onClose: () => void }) {
   const [rendered, setRendered] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(markdown);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4" onClick={onClose}>
       <div
@@ -64,6 +78,14 @@ function MarkdownModal({ markdown, onClose }: { markdown: string; onClose: () =>
               className={`h-7 text-xs font-mono gap-1 ${rendered ? "bg-zinc-800 text-zinc-100" : "text-zinc-500"}`}
             >
               <Eye className="w-3 h-3" /> Rendered
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={handleCopy}
+              className={`h-7 text-xs font-mono gap-1 ${copied ? "bg-green-950 text-green-300" : "text-zinc-500 hover:text-zinc-100"}`}
+            >
+              {copied ? "Copied" : "Copy Markdown"}
             </Button>
             <Button size="sm" variant="ghost" onClick={onClose} className="h-7 w-7 p-0 text-zinc-500 hover:text-zinc-100">
               <X className="w-4 h-4" />
@@ -225,7 +247,7 @@ function OptionsPanel({ opts, setOpts }: { opts: Options; setOpts: (o: Options) 
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function Home() {
-  const [apiUrl, setApiUrl] = useState("http://localhost:8336");
+  const apiUrl = DEFAULT_API_URL;
   const [apiKey, setApiKey] = useState("my-secret-token");
   const [file, setFile] = useState<File | null>(null);
   const [opts, setOpts] = useState<Options>(DEFAULT_OPTIONS);
@@ -348,11 +370,6 @@ export default function Home() {
                 <CardTitle className="flex items-center gap-2 text-zinc-100 text-sm"><Settings className="w-4 h-4" /> Connection</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                <div className="space-y-1">
-                  <Label className="text-zinc-400 text-xs">API Endpoint</Label>
-                  <Input value={apiUrl} onChange={e => setApiUrl(e.target.value)}
-                    className="bg-zinc-900 border-zinc-800 text-zinc-300 font-mono text-xs h-8" />
-                </div>
                 <div className="space-y-1">
                   <Label className="text-zinc-400 text-xs">Bearer Token</Label>
                   <Input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)}

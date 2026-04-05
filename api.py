@@ -108,6 +108,22 @@ def collect_generated_files(job_dir: str) -> list[str]:
     return generated_files
 
 
+def summarize_generated_files(job_dir: str, extras: dict | None = None) -> dict:
+    generated_files = collect_generated_files(job_dir)
+    relative_files = [Path(path).relative_to(job_dir).as_posix() for path in generated_files]
+    image_extensions = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+    image_files = [path for path in relative_files if Path(path).suffix.lower() in image_extensions]
+
+    return {
+        "generated_files": relative_files,
+        "generated_file_count": len(relative_files),
+        "image_files": image_files,
+        "image_file_count": len(image_files),
+        "images_expected": not bool((extras or {}).get("disable_image_extraction")),
+        "image_extraction_disabled": bool((extras or {}).get("disable_image_extraction")),
+    }
+
+
 def create_ssh_client() -> paramiko.SSHClient:
     ssh = paramiko.SSHClient()
     if SYNOLOGY_SSH_KNOWN_HOSTS_PATH:
@@ -146,13 +162,27 @@ def ensure_remote_dir(sftp: paramiko.SFTPClient, remote_dir: str):
 def upload_generated_files_to_synology(job_dir: str, original_base_name: str, log_file_path: str) -> dict:
     if not synology_ssh_enabled():
         append_job_log(log_file_path, "[nas] Synology SSH upload skipped: integration is not fully configured.")
-        return {"enabled": False, "status": "skipped", "uploaded_files": [], "target_dir": None}
+        return {
+            "enabled": False,
+            "status": "skipped",
+            "uploaded_files": [],
+            "uploaded_file_count": 0,
+            "target_dir": None,
+            "images_uploaded": 0,
+        }
 
     target_dir = build_synology_target_dir(original_base_name)
     generated_files = collect_generated_files(job_dir)
     if not generated_files:
         append_job_log(log_file_path, "[nas] No generated files found to upload.")
-        return {"enabled": True, "status": "skipped", "uploaded_files": [], "target_dir": target_dir}
+        return {
+            "enabled": True,
+            "status": "skipped",
+            "uploaded_files": [],
+            "uploaded_file_count": 0,
+            "target_dir": target_dir,
+            "images_uploaded": 0,
+        }
 
     uploaded_files = []
     ssh = None
@@ -173,20 +203,30 @@ def upload_generated_files_to_synology(job_dir: str, original_base_name: str, lo
             uploaded_files.append(relative_path)
 
         append_job_log(log_file_path, f"[nas] Uploaded {len(uploaded_files)} file(s) to Synology over SSH.")
+        images_uploaded = len(
+            [path for path in uploaded_files if Path(path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}]
+        )
         return {
             "enabled": True,
             "status": "uploaded",
             "uploaded_files": uploaded_files,
+            "uploaded_file_count": len(uploaded_files),
             "target_dir": target_dir,
+            "images_uploaded": images_uploaded,
         }
     except Exception as exc:
         append_job_log(log_file_path, f"[nas] Upload failed: {exc}")
+        images_uploaded = len(
+            [path for path in uploaded_files if Path(path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}]
+        )
         return {
             "enabled": True,
             "status": "failed",
             "error": str(exc),
             "uploaded_files": uploaded_files,
+            "uploaded_file_count": len(uploaded_files),
             "target_dir": target_dir,
+            "images_uploaded": images_uploaded,
         }
     finally:
         try:
@@ -271,6 +311,32 @@ def write_job_metadata(job_dir: str, **fields):
     with open(status_file, "w", encoding="utf-8") as f:
         json.dump(existing, f)
 
+
+def finalize_job_metadata(job_dir: str, extras: dict | None, nas_upload: dict | None):
+    artifact_summary = summarize_generated_files(job_dir, extras)
+    uploaded_files = (nas_upload or {}).get("uploaded_files", [])
+    artifact_summary["uploaded_files"] = uploaded_files
+    artifact_summary["uploaded_file_count"] = len(uploaded_files)
+    artifact_summary["uploaded_image_files"] = [
+        path for path in uploaded_files if Path(path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+    ]
+    artifact_summary["uploaded_image_file_count"] = len(artifact_summary["uploaded_image_files"])
+    artifact_summary["nas_transfer_complete"] = bool(nas_upload and nas_upload.get("status") == "uploaded")
+
+    write_job_metadata(
+        job_dir,
+        request_options=extras or {},
+        artifact_summary=artifact_summary,
+        nas_upload=nas_upload or {
+            "enabled": False,
+            "status": "skipped",
+            "uploaded_files": [],
+            "uploaded_file_count": 0,
+            "target_dir": None,
+            "images_uploaded": 0,
+        },
+    )
+
 def background_conversion(job_id: str, original_base_name: str, pdf_path: str, job_dir: str, extras: dict = None):
     cmd = get_marker_cmd(pdf_path, MARKER_OUTPUT_DIR, extras)
     env = get_run_env()
@@ -293,7 +359,7 @@ def background_conversion(job_id: str, original_base_name: str, pdf_path: str, j
         else:
             update_job_status(job_dir, "completed")
             nas_upload = upload_generated_files_to_synology(job_dir, original_base_name, log_file_path)
-            write_job_metadata(job_dir, nas_upload=nas_upload)
+            finalize_job_metadata(job_dir, extras, nas_upload)
             
     except Exception as e:
         update_job_status(job_dir, "failed", str(e))
@@ -347,6 +413,7 @@ async def convert_async(
         shutil.copyfileobj(file.file, buffer)
         
     update_job_status(job_dir, "pending")
+    write_job_metadata(job_dir, request_options=extras)
     with open(os.path.join(job_dir, "output.log"), "w") as f:
         pass
         
@@ -374,6 +441,18 @@ async def get_status(job_id: str, token: str = Depends(verify_token)):
             logs = [line.strip() for line in lines[-50:] if line.strip()]  # return tail logs 
             
     status_data["logs"] = logs
+    artifact_summary = status_data.get("artifact_summary")
+    if artifact_summary:
+        image_note = "disabled" if artifact_summary.get("image_extraction_disabled") else "enabled"
+        status_data["status_summary"] = {
+            "nas_status": (status_data.get("nas_upload") or {}).get("status", "unknown"),
+            "generated_file_count": artifact_summary.get("generated_file_count", 0),
+            "uploaded_file_count": artifact_summary.get("uploaded_file_count", 0),
+            "image_extraction": image_note,
+            "images_expected": artifact_summary.get("images_expected", False),
+            "generated_image_file_count": artifact_summary.get("image_file_count", 0),
+            "uploaded_image_file_count": artifact_summary.get("uploaded_image_file_count", 0),
+        }
     return status_data
 
 
