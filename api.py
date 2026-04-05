@@ -19,6 +19,11 @@ MARKER_OUTPUT_DIR = os.getenv("MARKER_OUTPUT_DIR", r"C:\coding\marker_output")
 API_BEARER_TOKEN = os.getenv("MARKER_API_TOKEN", "my-secret-token")  # Change token in production!
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:8020/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "openai/gpt-oss-20b")
+MARKER_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("MARKER_ALLOWED_ORIGINS", "https://marker.servrar.net").split(",")
+    if origin.strip()
+]
 SYNOLOGY_SSH_HOST = os.getenv("SYNOLOGY_SSH_HOST", "")
 SYNOLOGY_SSH_PORT = int(os.getenv("SYNOLOGY_SSH_PORT", "22"))
 SYNOLOGY_SSH_USER = os.getenv("SYNOLOGY_SSH_USER", "")
@@ -44,7 +49,7 @@ app = FastAPI(title="Marker PDF Conversion API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=MARKER_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
