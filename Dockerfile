@@ -16,8 +16,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install the actual marker tool
-RUN pip install --no-cache-dir marker-pdf
+# Install Marker with full document-format support
+RUN pip install --no-cache-dir 'marker-pdf[full]'
 
 # Copy the API source
 COPY api.py .

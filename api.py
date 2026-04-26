@@ -19,6 +19,27 @@ MARKER_OUTPUT_DIR = os.getenv("MARKER_OUTPUT_DIR", r"C:\coding\marker_output")
 API_BEARER_TOKEN = os.getenv("MARKER_API_TOKEN", "my-secret-token")  # Change token in production!
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:8020/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "openai/gpt-oss-20b")
+SUPPORTED_UPLOAD_EXTENSIONS = [
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+    ".bmp",
+    ".tif",
+    ".tiff",
+    ".pptx",
+    ".docx",
+    ".xlsx",
+    ".html",
+    ".htm",
+    ".epub",
+]
+SUPPORTED_UPLOAD_EXTENSION_SET = set(SUPPORTED_UPLOAD_EXTENSIONS)
+SUPPORTED_UPLOAD_DESCRIPTION = (
+    "PDF, images (PNG, JPG, JPEG, WEBP, GIF, BMP, TIF, TIFF), PPTX, DOCX, XLSX, HTML/HTM, EPUB"
+)
 MARKER_ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv("MARKER_ALLOWED_ORIGINS", "https://marker.servrar.net").split(",")
@@ -76,6 +97,8 @@ async def health_check():
         "synology_ssh_host": SYNOLOGY_SSH_HOST,
         "synology_ssh_port": SYNOLOGY_SSH_PORT,
         "synology_ssh_remote_base_path": SYNOLOGY_SSH_REMOTE_BASE_PATH,
+        "supported_input_extensions": SUPPORTED_UPLOAD_EXTENSIONS,
+        "supported_input_description": SUPPORTED_UPLOAD_DESCRIPTION,
     }
 
 
@@ -95,13 +118,29 @@ def build_synology_target_dir(original_base_name: str) -> str:
     return f"{base}/{folder_name}"
 
 
+def get_upload_extension(filename: str | None) -> str:
+    return Path(filename or "").suffix.lower()
+
+
+def get_upload_stem(filename: str | None) -> str:
+    return sanitize_folder_name(Path(filename or "upload").stem)
+
+
+def ensure_supported_upload(filename: str | None):
+    if get_upload_extension(filename) not in SUPPORTED_UPLOAD_EXTENSION_SET:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Supported file types: {SUPPORTED_UPLOAD_DESCRIPTION}.",
+        )
+
+
 def append_job_log(log_file_path: str, message: str):
     print(message)
     with open(log_file_path, "a", encoding="utf-8") as log_file:
         log_file.write(f"{message}\n")
 
 
-def collect_generated_files(job_dir: str) -> list[str]:
+def collect_generated_files(job_dir: str, source_filename: str | None = None) -> list[str]:
     internal_names = {"status.json", "output.log"}
     generated_files = []
     for path in sorted(Path(job_dir).rglob("*")):
@@ -109,14 +148,15 @@ def collect_generated_files(job_dir: str) -> list[str]:
             continue
         if path.name in internal_names:
             continue
-        if path.suffix.lower() == ".pdf":
+        relative_path = path.relative_to(job_dir).as_posix()
+        if source_filename and relative_path == source_filename:
             continue
         generated_files.append(str(path))
     return generated_files
 
 
-def summarize_generated_files(job_dir: str, extras: dict | None = None) -> dict:
-    generated_files = collect_generated_files(job_dir)
+def summarize_generated_files(job_dir: str, extras: dict | None = None, source_filename: str | None = None) -> dict:
+    generated_files = collect_generated_files(job_dir, source_filename)
     relative_files = [Path(path).relative_to(job_dir).as_posix() for path in generated_files]
     image_extensions = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
     image_files = [path for path in relative_files if Path(path).suffix.lower() in image_extensions]
@@ -166,7 +206,12 @@ def ensure_remote_dir(sftp: paramiko.SFTPClient, remote_dir: str):
             sftp.mkdir(current.as_posix())
 
 
-def upload_generated_files_to_synology(job_dir: str, original_base_name: str, log_file_path: str) -> dict:
+def upload_generated_files_to_synology(
+    job_dir: str,
+    original_base_name: str,
+    log_file_path: str,
+    source_filename: str | None = None,
+) -> dict:
     if not synology_ssh_enabled():
         append_job_log(log_file_path, "[nas] Synology SSH upload skipped: integration is not fully configured.")
         return {
@@ -179,7 +224,7 @@ def upload_generated_files_to_synology(job_dir: str, original_base_name: str, lo
         }
 
     target_dir = build_synology_target_dir(original_base_name)
-    generated_files = collect_generated_files(job_dir)
+    generated_files = collect_generated_files(job_dir, source_filename)
     if not generated_files:
         append_job_log(log_file_path, "[nas] No generated files found to upload.")
         return {
@@ -247,10 +292,10 @@ def upload_generated_files_to_synology(job_dir: str, original_base_name: str, lo
         except Exception:
             pass
 
-def get_marker_cmd(pdf_path: str, output_dir: str, extras: dict = None):
+def get_marker_cmd(input_path: str, output_dir: str, extras: dict = None):
     cmd = [
         "marker_single",
-        pdf_path,
+        input_path,
         "--output_dir", output_dir,
         "--output_format", "markdown",
         "--use_llm",
@@ -319,8 +364,8 @@ def write_job_metadata(job_dir: str, **fields):
         json.dump(existing, f)
 
 
-def finalize_job_metadata(job_dir: str, extras: dict | None, nas_upload: dict | None):
-    artifact_summary = summarize_generated_files(job_dir, extras)
+def finalize_job_metadata(job_dir: str, extras: dict | None, nas_upload: dict | None, source_filename: str | None = None):
+    artifact_summary = summarize_generated_files(job_dir, extras, source_filename)
     uploaded_files = (nas_upload or {}).get("uploaded_files", [])
     artifact_summary["uploaded_files"] = uploaded_files
     artifact_summary["uploaded_file_count"] = len(uploaded_files)
@@ -342,10 +387,11 @@ def finalize_job_metadata(job_dir: str, extras: dict | None, nas_upload: dict | 
             "target_dir": None,
             "images_uploaded": 0,
         },
+        source_filename=source_filename,
     )
 
-def background_conversion(job_id: str, original_base_name: str, pdf_path: str, job_dir: str, extras: dict = None):
-    cmd = get_marker_cmd(pdf_path, MARKER_OUTPUT_DIR, extras)
+def background_conversion(job_id: str, original_base_name: str, input_path: str, job_dir: str, extras: dict = None):
+    cmd = get_marker_cmd(input_path, MARKER_OUTPUT_DIR, extras)
     env = get_run_env()
     log_file_path = os.path.join(job_dir, "output.log")
     
@@ -365,8 +411,9 @@ def background_conversion(job_id: str, original_base_name: str, pdf_path: str, j
             update_job_status(job_dir, "failed", f"Process exited with code {process.returncode}")
         else:
             update_job_status(job_dir, "completed")
-            nas_upload = upload_generated_files_to_synology(job_dir, original_base_name, log_file_path)
-            finalize_job_metadata(job_dir, extras, nas_upload)
+            source_filename = Path(input_path).name
+            nas_upload = upload_generated_files_to_synology(job_dir, original_base_name, log_file_path, source_filename)
+            finalize_job_metadata(job_dir, extras, nas_upload, source_filename)
             
     except Exception as e:
         update_job_status(job_dir, "failed", str(e))
@@ -405,26 +452,32 @@ async def convert_async(
         "highres_image_dpi": highres_image_dpi,
     }
 
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    ensure_supported_upload(file.filename)
         
     job_id = str(uuid.uuid4())[:8]
-    original_base_name = os.path.splitext(file.filename)[0]
+    original_base_name = get_upload_stem(file.filename)
+    input_extension = get_upload_extension(file.filename)
     unique_name = f"{original_base_name}_{job_id}"
     
     job_dir = os.path.join(MARKER_OUTPUT_DIR, unique_name)
     os.makedirs(job_dir, exist_ok=True)
     
-    pdf_path = os.path.join(job_dir, f"{unique_name}.pdf")
-    with open(pdf_path, "wb") as buffer:
+    source_filename = f"{unique_name}{input_extension}"
+    input_path = os.path.join(job_dir, source_filename)
+    with open(input_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
     update_job_status(job_dir, "pending")
-    write_job_metadata(job_dir, request_options=extras)
+    write_job_metadata(
+        job_dir,
+        request_options=extras,
+        original_filename=file.filename,
+        source_filename=source_filename,
+    )
     with open(os.path.join(job_dir, "output.log"), "w") as f:
         pass
         
-    background_tasks.add_task(background_conversion, job_id, original_base_name, pdf_path, job_dir, extras)
+    background_tasks.add_task(background_conversion, job_id, original_base_name, input_path, job_dir, extras)
     
     return {"job_id": unique_name, "status": "pending", "message": "Conversion started. Poll /status/{job_id}"}
 
@@ -494,10 +547,18 @@ async def list_job_files(job_id: str, token: str = Depends(verify_token)):
     job_dir = os.path.join(MARKER_OUTPUT_DIR, job_id)
     if not os.path.exists(job_dir):
         raise HTTPException(status_code=404, detail="Job not found.")
+    source_filename = None
+    status_file = os.path.join(job_dir, "status.json")
+    if os.path.exists(status_file):
+        with open(status_file, "r", encoding="utf-8") as f:
+            status_data = json.load(f)
+            source_filename = status_data.get("source_filename")
     files = []
     for fname in sorted(os.listdir(job_dir)):
         # Skip internal tracking files
         if fname in ("status.json", "output.log"):
+            continue
+        if source_filename and fname == source_filename:
             continue
         fpath = os.path.join(job_dir, fname)
         fsize = os.path.getsize(fpath) if os.path.isfile(fpath) else 0
@@ -514,20 +575,20 @@ async def convert_stream(
     file: UploadFile = File(...),
     token: str = Depends(verify_token)
 ):
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    ensure_supported_upload(file.filename)
         
     job_id = str(uuid.uuid4())[:8]
-    original_base_name = os.path.splitext(file.filename)[0]
+    original_base_name = get_upload_stem(file.filename)
+    input_extension = get_upload_extension(file.filename)
     unique_name = f"{original_base_name}_{job_id}"
     
     temp_dir = tempfile.mkdtemp(prefix="marker_api_stream_")
-    temp_pdf_path = os.path.join(temp_dir, f"{unique_name}.pdf")
+    temp_input_path = os.path.join(temp_dir, f"{unique_name}{input_extension}")
     
-    with open(temp_pdf_path, "wb") as buffer:
+    with open(temp_input_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
-    cmd = get_marker_cmd(temp_pdf_path, MARKER_OUTPUT_DIR)
+    cmd = get_marker_cmd(temp_input_path, MARKER_OUTPUT_DIR)
     env = get_run_env()
 
     async def event_generator():
@@ -590,21 +651,21 @@ async def convert_pdf(
     token: str = Depends(verify_token)
 ):
     # Backward compatible synchronous run
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    ensure_supported_upload(file.filename)
         
     hit_id = str(uuid.uuid4())[:8]
-    original_base_name = os.path.splitext(file.filename)[0]
+    original_base_name = get_upload_stem(file.filename)
+    input_extension = get_upload_extension(file.filename)
     unique_name = f"{original_base_name}_{hit_id}"
     
     temp_dir = tempfile.mkdtemp(prefix="marker_api_in_")
-    temp_pdf_path = os.path.join(temp_dir, f"{unique_name}.pdf")
+    temp_input_path = os.path.join(temp_dir, f"{unique_name}{input_extension}")
     
     try:
-        with open(temp_pdf_path, "wb") as buffer:
+        with open(temp_input_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
             
-        cmd = get_marker_cmd(temp_pdf_path, MARKER_OUTPUT_DIR)
+        cmd = get_marker_cmd(temp_input_path, MARKER_OUTPUT_DIR)
         result = subprocess.run(cmd, env=get_run_env())
         
         if result.returncode != 0:

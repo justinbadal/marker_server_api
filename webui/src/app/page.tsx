@@ -14,6 +14,8 @@ import {
 } from "lucide-react";
 
 const DEFAULT_API_URL = process.env.NEXT_PUBLIC_MARKER_API_BASE_URL || "/api";
+const SUPPORTED_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.pptx,.docx,.xlsx,.html,.htm,.epub";
+const SUPPORTED_FILE_LABEL = "PDF, images, PPTX, DOCX, XLSX, HTML, EPUB";
 
 // ─── types ───────────────────────────────────────────────────────────────────
 interface JobFile { name: string; size: number; }
@@ -331,8 +333,8 @@ export default function Home() {
       setStatus("processing");
       const activeOpts = Object.entries(opts).filter(([k, v]) => v !== false && v !== "" && v !== DEFAULT_OPTIONS[k as keyof Options]).map(([k,v]) => `${k}=${v}`);
       setLogs([`> Job started: ${data.job_id}`, ...(activeOpts.length ? [`> Options: ${activeOpts.join(", ")}`] : [])]);
-    } catch (err: any) {
-      setErrorMsg(err.message);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Conversion failed");
       setStatus("error");
     }
   };
@@ -343,7 +345,8 @@ export default function Home() {
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = `${file?.name.replace(".pdf", "") || "converted"}.md`;
+    const fileBaseName = file?.name ? file.name.replace(/\.[^.]+$/, "") : "converted";
+    a.href = url; a.download = `${fileBaseName}.md`;
     document.body.appendChild(a); a.click(); a.remove();
   };
 
@@ -357,7 +360,7 @@ export default function Home() {
         {/* Header */}
         <div className="flex items-center gap-3 pb-3 border-b border-zinc-800 text-zinc-100">
           <Terminal className="w-7 h-7" />
-          <h1 className="text-2xl font-bold tracking-tight">MARKER-PDF STUDIO</h1>
+          <h1 className="text-2xl font-bold tracking-tight">MARKER STUDIO</h1>
         </div>
 
         {/* Status Bar */}
@@ -387,9 +390,12 @@ export default function Home() {
                 <CardTitle className="flex items-center gap-2 text-zinc-100 text-sm"><Upload className="w-4 h-4" /> Payload</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                <Input type="file" accept=".pdf"
+                <Input type="file" accept={SUPPORTED_FILE_ACCEPT}
                   onChange={e => setFile(e.target.files?.[0] || null)}
                   className="bg-zinc-900 border-zinc-800 text-zinc-300 cursor-pointer text-xs h-8" />
+                <p className="text-[11px] text-zinc-500">
+                  Accepts {SUPPORTED_FILE_LABEL}.
+                </p>
                 <Button onClick={handleStart} disabled={!file || busy}
                   className="w-full bg-zinc-100 text-zinc-950 hover:bg-zinc-300 font-bold text-xs h-9">
                   {status === "uploading" ? "Uploading..." : busy ? "Converting..." : <><Play className="w-3.5 h-3.5 mr-1.5" />Start Conversion</>}
