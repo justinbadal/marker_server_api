@@ -12,7 +12,14 @@ MCP_HOST = os.getenv("MARKER_MCP_HOST", "0.0.0.0")
 MCP_PORT = int(os.getenv("MARKER_MCP_PORT", "8337"))
 MCP_PATH = os.getenv("MARKER_MCP_PATH", "/mcp")
 
-mcp = FastMCP("Marker MCP", stateless_http=True, json_response=True)
+mcp = FastMCP(
+    "Marker MCP",
+    host=MCP_HOST,
+    port=MCP_PORT,
+    streamable_http_path=MCP_PATH,
+    stateless_http=True,
+    json_response=True,
+)
 
 
 def auth_headers() -> dict[str, str]:
@@ -181,9 +188,4 @@ async def marker_download_markdown(job_id: str) -> str:
 
 
 if __name__ == "__main__":
-    mcp.run(
-        transport="streamable-http",
-        host=MCP_HOST,
-        port=MCP_PORT,
-        streamable_http_path=MCP_PATH,
-    )
+    mcp.run(transport="streamable-http")
