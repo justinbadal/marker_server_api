@@ -43,6 +43,25 @@ services:
     env_file:
       - .env
 
+  marker-mcp:
+    image: ghcr.io/justinbadal/marker_mcp:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    container_name: marker-mcp
+    restart: unless-stopped
+    ports:
+      - "${MARKER_MCP_BIND_HOST:-10.0.1.18}:${MARKER_MCP_PORT:-8337}:8337"
+    depends_on:
+      - marker-api
+    environment:
+      - MARKER_API_BASE_URL=http://marker-api:8336
+      - MARKER_MCP_HOST=0.0.0.0
+      - MARKER_MCP_PORT=8337
+      - MARKER_MCP_PATH=${MARKER_MCP_PATH:-/mcp}
+    env_file:
+      - .env
+
   marker-proxy:
     image: caddy:2
     container_name: marker-proxy
@@ -70,5 +89,5 @@ services:
       - WATCHTOWER_INCLUDE_RESTARTING=true
       # Force modern API version for Docker Desktop 26+ compatibility
       - DOCKER_API_VERSION=1.44
-    # Ensure it only watches the marker-api, marker-webui, marker-proxy and itself
-    command: marker-api marker-webui marker-proxy watchtower
+    # Ensure it only watches the marker-api, marker-webui, marker-mcp, marker-proxy and itself
+    command: marker-api marker-webui marker-mcp marker-proxy watchtower

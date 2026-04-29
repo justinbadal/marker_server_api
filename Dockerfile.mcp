@@ -1,0 +1,16 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir mcp httpx
+
+COPY mcp_server.py .
+
+ENV MARKER_API_BASE_URL=http://marker-api:8336
+ENV MARKER_MCP_HOST=0.0.0.0
+ENV MARKER_MCP_PORT=8337
+ENV MARKER_MCP_PATH=/mcp
+
+EXPOSE 8337
+
+CMD ["python", "mcp_server.py"]

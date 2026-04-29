@@ -25,6 +25,9 @@ jobs:
           - name: marker_webui
             context: ./webui
             dockerfile: ./webui/Dockerfile
+          - name: marker_mcp
+            context: .
+            dockerfile: ./Dockerfile.mcp
 
     steps:
       - name: Checkout repository
