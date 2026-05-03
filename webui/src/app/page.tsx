@@ -10,7 +10,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Label } from "@/components/ui/label";
 import {
   Terminal, Upload, Play, Settings, CheckCircle2, AlertCircle,
-  Activity, FileText, ChevronDown, ChevronUp, Code, Eye, X, File,
+  Activity, FileText, ChevronDown, ChevronUp, Code, Eye, X, File, FolderOpen, Download,
 } from "lucide-react";
 
 const DEFAULT_API_URL = process.env.NEXT_PUBLIC_MARKER_API_BASE_URL || "/api";
@@ -19,6 +19,18 @@ const SUPPORTED_FILE_LABEL = "PDF, images, PPTX, DOCX, XLSX, HTML, EPUB";
 
 // ─── types ───────────────────────────────────────────────────────────────────
 interface JobFile { name: string; size: number; }
+interface BatchItem {
+  item_id: string;
+  original_filename: string;
+  status: string;
+  error?: string;
+  files?: JobFile[];
+  logs?: string[];
+  artifact_summary?: {
+    generated_file_count?: number;
+    image_file_count?: number;
+  };
+}
 interface Options {
   page_range: string;
   force_ocr: boolean;
@@ -30,6 +42,13 @@ interface Options {
   strip_existing_ocr: boolean;
   max_concurrency: number;
   highres_image_dpi: number;
+}
+
+interface BatchStatusResponse {
+  status: string;
+  total_items: number;
+  completed_items: number;
+  items: BatchItem[];
 }
 
 function fmt(bytes: number) {
@@ -254,7 +273,7 @@ function OptionsPanel({ opts, setOpts }: { opts: Options; setOpts: (o: Options) 
 export default function Home() {
   const apiUrl = DEFAULT_API_URL;
   const [apiKey, setApiKey] = useState("my-secret-token");
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [opts, setOpts] = useState<Options>(DEFAULT_OPTIONS);
 
   const [status, setStatus] = useState<"idle" | "uploading" | "processing" | "completed" | "error">("idle");
@@ -264,6 +283,11 @@ export default function Home() {
   const [markdown, setMarkdown] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [jobFiles, setJobFiles] = useState<JobFile[]>([]);
+  const [batchItems, setBatchItems] = useState<BatchItem[]>([]);
+  const [isBatchJob, setIsBatchJob] = useState(false);
+  const [openItems, setOpenItems] = useState<Record<string, boolean>>({});
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -274,55 +298,85 @@ export default function Home() {
     }
   }, [logs]);
 
+  useEffect(() => {
+    if (folderInputRef.current) {
+      folderInputRef.current.setAttribute("webkitdirectory", "");
+      folderInputRef.current.setAttribute("directory", "");
+    }
+  }, []);
+
+  const selectedLabel = files.length === 0
+    ? "No files selected"
+    : files.length === 1
+      ? files[0].name
+      : `${files.length} files selected`;
+
   // Polling: status + files
   useEffect(() => {
     if (status !== "processing" || !jobId) return;
     const id = setInterval(async () => {
       try {
-        const res = await fetch(`${apiUrl}/status/${jobId}`, {
+        const statusPath = isBatchJob ? `${apiUrl}/batch/status/${jobId}` : `${apiUrl}/status/${jobId}`;
+        const res = await fetch(statusPath, {
           headers: { Authorization: `Bearer ${apiKey}` },
         });
         const data = await res.json();
         if (data.logs?.length) setLogs(data.logs);
 
-        if (data.status === "completed") {
+        if (data.status === "completed" || data.status === "completed_with_errors") {
           setStatus("completed");
-          // fetch markdown
-          const mdRes = await fetch(`${apiUrl}/download/${jobId}`, {
-            headers: { Authorization: `Bearer ${apiKey}` },
-          });
-          setMarkdown(await mdRes.text());
-          // fetch file listing
-          const fRes = await fetch(`${apiUrl}/files/${jobId}`, {
-            headers: { Authorization: `Bearer ${apiKey}` },
-          });
-          const fData = await fRes.json();
-          setJobFiles(fData.files ?? []);
+          if (isBatchJob) {
+            setBatchItems(data.items ?? []);
+          } else {
+            const mdRes = await fetch(`${apiUrl}/download/${jobId}`, {
+              headers: { Authorization: `Bearer ${apiKey}` },
+            });
+            setMarkdown(await mdRes.text());
+            const fRes = await fetch(`${apiUrl}/files/${jobId}`, {
+              headers: { Authorization: `Bearer ${apiKey}` },
+            });
+            const fData = await fRes.json();
+            setJobFiles(fData.files ?? []);
+          }
         } else if (data.status === "failed") {
           setStatus("error");
           setErrorMsg(data.error || "Conversion failed");
+        } else if (isBatchJob) {
+          setBatchItems(data.items ?? []);
         }
       } catch {}
     }, 2000);
     return () => clearInterval(id);
-  }, [status, jobId, apiUrl, apiKey]);
+  }, [status, jobId, apiUrl, apiKey, isBatchJob]);
+
+  const handleSelection = (selected: FileList | null) => {
+    setFiles(selected ? Array.from(selected) : []);
+  };
 
   const handleStart = async () => {
-    if (!file) return;
+    if (files.length === 0) return;
     setStatus("uploading");
     setLogs([]);
     setMarkdown("");
     setErrorMsg("");
     setJobFiles([]);
+    setBatchItems([]);
+    setOpenItems({});
+    const batchMode = files.length > 1;
+    setIsBatchJob(batchMode);
     const fd = new FormData();
-    fd.append("file", file);
+    if (batchMode) {
+      files.forEach((selectedFile) => fd.append("files", selectedFile));
+    } else {
+      fd.append("file", files[0]);
+    }
     Object.entries(opts).forEach(([k, v]) => {
       if (v !== undefined && v !== null) {
         fd.append(k, v.toString());
       }
     });
     try {
-      const res = await fetch(`${apiUrl}/convert/async`, {
+      const res = await fetch(`${apiUrl}/${batchMode ? "convert/batch" : "convert/async"}`, {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}` },
         body: fd,
@@ -332,7 +386,11 @@ export default function Home() {
       setJobId(data.job_id);
       setStatus("processing");
       const activeOpts = Object.entries(opts).filter(([k, v]) => v !== false && v !== "" && v !== DEFAULT_OPTIONS[k as keyof Options]).map(([k,v]) => `${k}=${v}`);
-      setLogs([`> Job started: ${data.job_id}`, ...(activeOpts.length ? [`> Options: ${activeOpts.join(", ")}`] : [])]);
+      setLogs([
+        `> Job started: ${data.job_id}`,
+        `> Mode: ${batchMode ? `batch (${files.length} files, max 4 at once)` : "single file"}`,
+        ...(activeOpts.length ? [`> Options: ${activeOpts.join(", ")}`] : []),
+      ]);
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : "Conversion failed");
       setStatus("error");
@@ -340,14 +398,46 @@ export default function Home() {
   };
 
   const handleDownload = async () => {
-    if (!jobId) return;
+    if (!jobId || isBatchJob) return;
     const res = await fetch(`${apiUrl}/download/${jobId}`, { headers: { Authorization: `Bearer ${apiKey}` } });
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    const fileBaseName = file?.name ? file.name.replace(/\.[^.]+$/, "") : "converted";
+    const fileBaseName = files[0]?.name ? files[0].name.replace(/\.[^.]+$/, "") : "converted";
     a.href = url; a.download = `${fileBaseName}.md`;
     document.body.appendChild(a); a.click(); a.remove();
+  };
+
+  const handleBatchDownload = async () => {
+    if (!jobId || !isBatchJob) return;
+    const res = await fetch(`${apiUrl}/batch/download/${jobId}`, { headers: { Authorization: `Bearer ${apiKey}` } });
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `${jobId}.zip`;
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+
+  const handleBatchItemDownload = async (item: BatchItem) => {
+    if (!jobId) return;
+    const res = await fetch(`${apiUrl}/batch/download/${jobId}/${item.item_id}`, { headers: { Authorization: `Bearer ${apiKey}` } });
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${item.original_filename.replace(/\.[^.]+$/, "")}.md`;
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+
+  const handlePreviewBatchItem = async (item: BatchItem) => {
+    if (!jobId) return;
+    const res = await fetch(`${apiUrl}/batch/download/${jobId}/${item.item_id}`, { headers: { Authorization: `Bearer ${apiKey}` } });
+    setMarkdown(await res.text());
+    setModalOpen(true);
+  };
+
+  const toggleItemOpen = (itemId: string) => {
+    setOpenItems((prev) => ({ ...prev, [itemId]: !prev[itemId] }));
   };
 
   const busy = status === "uploading" || status === "processing";
@@ -390,13 +480,53 @@ export default function Home() {
                 <CardTitle className="flex items-center gap-2 text-zinc-100 text-sm"><Upload className="w-4 h-4" /> Payload</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                <Input type="file" accept={SUPPORTED_FILE_ACCEPT}
-                  onChange={e => setFile(e.target.files?.[0] || null)}
-                  className="bg-zinc-900 border-zinc-800 text-zinc-300 cursor-pointer text-xs h-8" />
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept={SUPPORTED_FILE_ACCEPT}
+                  multiple
+                  onChange={e => handleSelection(e.target.files)}
+                  className="hidden"
+                />
+                <input
+                  ref={folderInputRef}
+                  type="file"
+                  accept={SUPPORTED_FILE_ACCEPT}
+                  multiple
+                  onChange={e => handleSelection(e.target.files)}
+                  className="hidden"
+                />
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="flex-1 border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+                  >
+                    <File className="w-3.5 h-3.5 mr-1.5" /> Choose Files
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => folderInputRef.current?.click()}
+                    className="flex-1 border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5 mr-1.5" /> Choose Folder
+                  </Button>
+                </div>
+                <div className="rounded-md border border-zinc-800 bg-zinc-900/70 px-3 py-2">
+                  <p className="text-xs font-mono text-zinc-300">{selectedLabel}</p>
+                  {files.length > 0 && (
+                    <p className="mt-1 text-[11px] text-zinc-500">
+                      {files.slice(0, 4).map((selected) => selected.name).join(", ")}
+                      {files.length > 4 ? ` + ${files.length - 4} more` : ""}
+                    </p>
+                  )}
+                </div>
                 <p className="text-[11px] text-zinc-500">
-                  Accepts {SUPPORTED_FILE_LABEL}.
+                  Accepts {SUPPORTED_FILE_LABEL}. Batch jobs process up to 4 files at a time.
                 </p>
-                <Button onClick={handleStart} disabled={!file || busy}
+                <Button onClick={handleStart} disabled={files.length === 0 || busy}
                   className="w-full bg-zinc-100 text-zinc-950 hover:bg-zinc-300 font-bold text-xs h-9">
                   {status === "uploading" ? "Uploading..." : busy ? "Converting..." : <><Play className="w-3.5 h-3.5 mr-1.5" />Start Conversion</>}
                 </Button>
@@ -422,10 +552,16 @@ export default function Home() {
                   <span className={`w-2 h-2 rounded-full ${busy ? "bg-amber-400 animate-pulse" : status === "completed" ? "bg-green-500" : status === "error" ? "bg-red-500" : "bg-zinc-600"}`} />
                   STDOUT
                 </CardTitle>
-                {status === "completed" && (
+                {status === "completed" && !isBatchJob && (
                   <Button size="sm" onClick={handleDownload}
                     className="h-6 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-100 px-2">
                     Download .MD
+                  </Button>
+                )}
+                {status === "completed" && isBatchJob && (
+                  <Button size="sm" onClick={handleBatchDownload}
+                    className="h-6 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-100 px-2">
+                    <Download className="w-3 h-3 mr-1" /> Bulk Download ZIP
                   </Button>
                 )}
               </CardHeader>
@@ -447,7 +583,7 @@ export default function Home() {
             </Card>
 
             {/* Success Banner */}
-            {status === "completed" && markdown && (
+            {status === "completed" && !isBatchJob && markdown && (
               <button
                 onClick={() => setModalOpen(true)}
                 className="w-full text-left"
@@ -470,7 +606,7 @@ export default function Home() {
             )}
 
             {/* File Listing */}
-            {status === "completed" && jobFiles.length > 0 && (
+            {status === "completed" && !isBatchJob && jobFiles.length > 0 && (
               <Card className="bg-zinc-950 border-zinc-800">
                 <CardHeader className="py-2.5 px-4 border-b border-zinc-800">
                   <CardTitle className="text-xs font-mono text-zinc-500 uppercase tracking-wider flex items-center gap-2">
@@ -485,6 +621,98 @@ export default function Home() {
                         <span className="font-mono text-xs text-zinc-600 shrink-0 ml-4">{fmt(f.size)}</span>
                       </div>
                     ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {status === "completed" && isBatchJob && batchItems.length > 0 && (
+              <Card className="bg-zinc-950 border-zinc-800">
+                <CardHeader className="py-2.5 px-4 border-b border-zinc-800">
+                  <CardTitle className="text-xs font-mono text-zinc-500 uppercase tracking-wider flex items-center gap-2">
+                    <FolderOpen className="w-3.5 h-3.5" /> Batch Results ({batchItems.length})
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-0">
+                  <div className="divide-y divide-zinc-900">
+                    {batchItems.map((item) => {
+                      const isOpen = !!openItems[item.item_id];
+                      const itemFiles = item.files ?? [];
+                      return (
+                        <div key={item.item_id}>
+                          <button
+                            type="button"
+                            onClick={() => toggleItemOpen(item.item_id)}
+                            className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-zinc-900/50 transition-colors"
+                          >
+                            <div>
+                              <p className="font-mono text-xs text-zinc-200">{item.original_filename}</p>
+                              <p className="mt-1 text-[11px] text-zinc-500">
+                                {item.status}
+                                {item.artifact_summary?.generated_file_count ? ` • ${item.artifact_summary.generated_file_count} generated files` : ""}
+                                {item.artifact_summary?.image_file_count ? ` • ${item.artifact_summary.image_file_count} images` : ""}
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {item.status === "completed" && (
+                                <>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      void handlePreviewBatchItem(item);
+                                    }}
+                                    className="h-7 text-xs text-zinc-300 hover:text-zinc-100"
+                                  >
+                                    <Eye className="w-3 h-3 mr-1" /> Preview
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      void handleBatchItemDownload(item);
+                                    }}
+                                    className="h-7 text-xs text-zinc-300 hover:text-zinc-100"
+                                  >
+                                    <Download className="w-3 h-3 mr-1" /> Download
+                                  </Button>
+                                </>
+                              )}
+                              {isOpen ? <ChevronUp className="w-4 h-4 text-zinc-500" /> : <ChevronDown className="w-4 h-4 text-zinc-500" />}
+                            </div>
+                          </button>
+                          {isOpen && (
+                            <div className="border-t border-zinc-900 bg-zinc-950/70 px-4 py-3">
+                              {item.error && <p className="mb-2 text-xs text-red-400">{item.error}</p>}
+                              {item.logs?.length ? (
+                                <div className="mb-3 rounded-md bg-zinc-900 p-3">
+                                  <div className="font-mono text-[11px] text-zinc-500">Recent logs</div>
+                                  <div className="mt-2 space-y-1 font-mono text-[11px] text-zinc-400">
+                                    {item.logs.map((logLine, index) => <div key={`${item.item_id}-${index}`}>{logLine}</div>)}
+                                  </div>
+                                </div>
+                              ) : null}
+                              {itemFiles.length > 0 ? (
+                                <div className="space-y-2">
+                                  {itemFiles.map((generatedFile) => (
+                                    <div key={`${item.item_id}-${generatedFile.name}`} className="flex items-center justify-between rounded-md border border-zinc-900 px-3 py-2">
+                                      <span className="font-mono text-xs text-zinc-300">{generatedFile.name}</span>
+                                      <span className="font-mono text-xs text-zinc-600">{fmt(generatedFile.size)}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="text-xs text-zinc-500">No generated files listed.</p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </CardContent>
               </Card>

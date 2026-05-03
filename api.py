@@ -6,6 +6,7 @@ import tempfile
 import uuid
 import json
 import re
+import zipfile
 from pathlib import Path, PurePosixPath
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse
@@ -19,6 +20,7 @@ MARKER_OUTPUT_DIR = os.getenv("MARKER_OUTPUT_DIR", r"C:\coding\marker_output")
 API_BEARER_TOKEN = os.getenv("MARKER_API_TOKEN", "my-secret-token")  # Change token in production!
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:8020/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "openai/gpt-oss-20b")
+MAX_BATCH_CONCURRENCY = int(os.getenv("MARKER_BATCH_CONCURRENCY", "4"))
 SUPPORTED_UPLOAD_EXTENSIONS = [
     ".pdf",
     ".png",
@@ -124,6 +126,10 @@ def get_upload_extension(filename: str | None) -> str:
 
 def get_upload_stem(filename: str | None) -> str:
     return sanitize_folder_name(Path(filename or "upload").stem)
+
+
+def make_item_id(index: int, filename: str | None) -> str:
+    return f"{index:02d}-{get_upload_stem(filename)}"
 
 
 def ensure_supported_upload(filename: str | None):
@@ -364,6 +370,22 @@ def write_job_metadata(job_dir: str, **fields):
         json.dump(existing, f)
 
 
+def get_status_file_payload(job_dir: str) -> dict:
+    status_file = os.path.join(job_dir, "status.json")
+    if not os.path.exists(status_file):
+        raise HTTPException(status_code=404, detail="Job not found.")
+    with open(status_file, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def read_log_tail(log_file: str, limit: int = 50) -> list[str]:
+    if not os.path.exists(log_file):
+        return []
+    with open(log_file, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    return [line.strip() for line in lines[-limit:] if line.strip()]
+
+
 def finalize_job_metadata(job_dir: str, extras: dict | None, nas_upload: dict | None, source_filename: str | None = None):
     artifact_summary = summarize_generated_files(job_dir, extras, source_filename)
     uploaded_files = (nas_upload or {}).get("uploaded_files", [])
@@ -390,8 +412,9 @@ def finalize_job_metadata(job_dir: str, extras: dict | None, nas_upload: dict | 
         source_filename=source_filename,
     )
 
-def background_conversion(job_id: str, original_base_name: str, input_path: str, job_dir: str, extras: dict = None):
-    cmd = get_marker_cmd(input_path, MARKER_OUTPUT_DIR, extras)
+def run_single_conversion_job(original_base_name: str, input_path: str, job_dir: str, extras: dict = None):
+    output_root = str(Path(job_dir).parent)
+    cmd = get_marker_cmd(input_path, output_root, extras)
     env = get_run_env()
     log_file_path = os.path.join(job_dir, "output.log")
     
@@ -409,15 +432,91 @@ def background_conversion(job_id: str, original_base_name: str, input_path: str,
             
         if process.returncode != 0:
             update_job_status(job_dir, "failed", f"Process exited with code {process.returncode}")
-        else:
-            update_job_status(job_dir, "completed")
-            source_filename = Path(input_path).name
-            nas_upload = upload_generated_files_to_synology(job_dir, original_base_name, log_file_path, source_filename)
-            finalize_job_metadata(job_dir, extras, nas_upload, source_filename)
-            
+            return {"status": "failed", "error": f"Process exited with code {process.returncode}"}
+
+        update_job_status(job_dir, "completed")
+        source_filename = Path(input_path).name
+        nas_upload = upload_generated_files_to_synology(job_dir, original_base_name, log_file_path, source_filename)
+        finalize_job_metadata(job_dir, extras, nas_upload, source_filename)
+        return {
+            "status": "completed",
+            "job_dir": job_dir,
+            "source_filename": source_filename,
+            "nas_upload": nas_upload,
+        }
     except Exception as e:
         update_job_status(job_dir, "failed", str(e))
-        print(f"Job {job_id} failed: {e}")
+        print(f"Job {original_base_name} failed: {e}")
+        return {"status": "failed", "error": str(e)}
+
+
+def background_conversion(job_id: str, original_base_name: str, input_path: str, job_dir: str, extras: dict = None):
+    run_single_conversion_job(original_base_name, input_path, job_dir, extras)
+
+
+def update_batch_item_status(batch_dir: str, item_id: str, **fields):
+    batch_data = get_status_file_payload(batch_dir)
+    items = batch_data.get("items", [])
+    for item in items:
+        if item.get("item_id") == item_id:
+            item.update(fields)
+            break
+    completed = sum(1 for item in items if item.get("status") in {"completed", "failed"})
+    batch_data["completed_items"] = completed
+    batch_data["total_items"] = len(items)
+    batch_data["status"] = "completed" if completed == len(items) and items else "processing"
+    if completed == len(items) and any(item.get("status") == "failed" for item in items):
+        batch_data["status"] = "completed_with_errors"
+    elif completed == 0 and all(item.get("status") == "pending" for item in items):
+        batch_data["status"] = "pending"
+    with open(os.path.join(batch_dir, "status.json"), "w", encoding="utf-8") as f:
+        json.dump(batch_data, f)
+
+
+def build_batch_zip(batch_dir: str) -> str:
+    zip_path = os.path.join(batch_dir, "batch_results.zip")
+    if os.path.exists(zip_path):
+        os.remove(zip_path)
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(Path(batch_dir).rglob("*")):
+            if not path.is_file():
+                continue
+            if path.name in {"status.json", "output.log", "batch_results.zip"}:
+                continue
+            archive.write(path, path.relative_to(batch_dir).as_posix())
+    return zip_path
+
+
+def run_batch_item(batch_job_id: str, batch_dir: str, item: dict, extras: dict):
+    item_id = item["item_id"]
+    item_dir = os.path.join(batch_dir, item_id)
+    update_batch_item_status(batch_dir, item_id, status="processing")
+    result = run_single_conversion_job(item["original_base_name"], item["input_path"], item_dir, extras)
+    log_file = os.path.join(item_dir, "output.log")
+    item_status = get_status_file_payload(item_dir)
+    item_files = list_job_files_payload(item_dir)
+    update_batch_item_status(
+        batch_dir,
+        item_id,
+        status=item_status.get("status", result.get("status", "failed")),
+        error=item_status.get("error"),
+        logs=read_log_tail(log_file),
+        files=item_files,
+        artifact_summary=item_status.get("artifact_summary"),
+        nas_upload=item_status.get("nas_upload"),
+        source_filename=item_status.get("source_filename"),
+    )
+
+
+def background_batch_conversion(batch_job_id: str, batch_dir: str, items: list[dict], extras: dict):
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    write_job_metadata(batch_dir, status="processing")
+    with ThreadPoolExecutor(max_workers=MAX_BATCH_CONCURRENCY) as executor:
+        futures = [executor.submit(run_batch_item, batch_job_id, batch_dir, item, extras) for item in items]
+        for _ in as_completed(futures):
+            pass
+    build_batch_zip(batch_dir)
 
 # ---------------------------------------------------------
 # OPTION 1: ASYNC POLLING (RECOMMENDED FOR LONG JOBS)
@@ -482,25 +581,103 @@ async def convert_async(
     return {"job_id": unique_name, "status": "pending", "message": "Conversion started. Poll /status/{job_id}"}
 
 
+@app.post("/convert/batch")
+async def convert_batch(
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    page_range: str = Form(None, description="e.g. 0,5-10,20"),
+    force_ocr: bool = Form(False),
+    disable_image_extraction: bool = Form(False),
+    paginate_output: bool = Form(False),
+    keep_pageheader_in_output: bool = Form(False),
+    html_tables_in_markdown: bool = Form(False),
+    disable_links: bool = Form(False),
+    strip_existing_ocr: bool = Form(False),
+    max_concurrency: int = Form(4),
+    highres_image_dpi: int = Form(192),
+    token: str = Depends(verify_token)
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided.")
+
+    extras = {
+        "page_range": page_range,
+        "force_ocr": force_ocr,
+        "disable_image_extraction": disable_image_extraction,
+        "paginate_output": paginate_output,
+        "keep_pageheader_in_output": keep_pageheader_in_output,
+        "html_tables_in_markdown": html_tables_in_markdown,
+        "disable_links": disable_links,
+        "strip_existing_ocr": strip_existing_ocr,
+        "max_concurrency": max_concurrency,
+        "highres_image_dpi": highres_image_dpi,
+    }
+
+    batch_job_id = f"batch_{str(uuid.uuid4())[:8]}"
+    batch_dir = os.path.join(MARKER_OUTPUT_DIR, batch_job_id)
+    os.makedirs(batch_dir, exist_ok=True)
+
+    items = []
+    for index, file in enumerate(files, start=1):
+        ensure_supported_upload(file.filename)
+        item_id = make_item_id(index, file.filename)
+        item_dir = os.path.join(batch_dir, item_id)
+        os.makedirs(item_dir, exist_ok=True)
+        input_extension = get_upload_extension(file.filename)
+        source_filename = f"{item_id}{input_extension}"
+        input_path = os.path.join(item_dir, source_filename)
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        item_metadata = {
+            "item_id": item_id,
+            "original_filename": file.filename,
+            "original_base_name": get_upload_stem(file.filename),
+            "source_filename": source_filename,
+            "input_path": input_path,
+            "job_id": item_id,
+            "status": "pending",
+            "files": [],
+        }
+        items.append(item_metadata)
+        update_job_status(item_dir, "pending")
+        write_job_metadata(
+            item_dir,
+            request_options=extras,
+            original_filename=file.filename,
+            source_filename=source_filename,
+            item_id=item_id,
+            batch_job_id=batch_job_id,
+        )
+        with open(os.path.join(item_dir, "output.log"), "w", encoding="utf-8"):
+            pass
+
+    write_job_metadata(
+        batch_dir,
+        status="pending",
+        request_options=extras,
+        total_items=len(items),
+        completed_items=0,
+        items=[{k: v for k, v in item.items() if k != "input_path"} for item in items],
+    )
+    with open(os.path.join(batch_dir, "output.log"), "w", encoding="utf-8") as f:
+        f.write("")
+
+    background_tasks.add_task(background_batch_conversion, batch_job_id, batch_dir, items, extras)
+    return {
+        "job_id": batch_job_id,
+        "status": "pending",
+        "total_items": len(items),
+        "message": f"Batch conversion started with up to {MAX_BATCH_CONCURRENCY} files processing at once.",
+    }
+
+
 @app.get("/status/{job_id}")
 async def get_status(job_id: str, token: str = Depends(verify_token)):
     job_dir = os.path.join(MARKER_OUTPUT_DIR, job_id)
-    status_file = os.path.join(job_dir, "status.json")
-    
-    if not os.path.exists(status_file):
-        raise HTTPException(status_code=404, detail="Job not found.")
-        
-    with open(status_file, "r") as f:
-        status_data = json.load(f)
+    status_data = get_status_file_payload(job_dir)
         
     log_file = os.path.join(job_dir, "output.log")
-    logs = []
-    if os.path.exists(log_file):
-        with open(log_file, "r") as f:
-            lines = f.readlines()
-            logs = [line.strip() for line in lines[-50:] if line.strip()]  # return tail logs 
-            
-    status_data["logs"] = logs
+    status_data["logs"] = read_log_tail(log_file)
     artifact_summary = status_data.get("artifact_summary")
     if artifact_summary:
         image_note = "disabled" if artifact_summary.get("image_extraction_disabled") else "enabled"
@@ -513,6 +690,17 @@ async def get_status(job_id: str, token: str = Depends(verify_token)):
             "generated_image_file_count": artifact_summary.get("image_file_count", 0),
             "uploaded_image_file_count": artifact_summary.get("uploaded_image_file_count", 0),
         }
+    return status_data
+
+
+@app.get("/batch/status/{job_id}")
+async def get_batch_status(job_id: str, token: str = Depends(verify_token)):
+    batch_dir = os.path.join(MARKER_OUTPUT_DIR, job_id)
+    status_data = get_status_file_payload(batch_dir)
+    for item in status_data.get("items", []):
+        item_dir = os.path.join(batch_dir, item["item_id"])
+        item["logs"] = read_log_tail(os.path.join(item_dir, "output.log"), 20)
+    status_data["logs"] = read_log_tail(os.path.join(batch_dir, "output.log"))
     return status_data
 
 
@@ -542,11 +730,7 @@ async def download_result(job_id: str, token: str = Depends(verify_token)):
     return FileResponse(path=md_file_path, filename=os.path.basename(md_file_path), media_type="text/markdown")
 
 
-@app.get("/files/{job_id}")
-async def list_job_files(job_id: str, token: str = Depends(verify_token)):
-    job_dir = os.path.join(MARKER_OUTPUT_DIR, job_id)
-    if not os.path.exists(job_dir):
-        raise HTTPException(status_code=404, detail="Job not found.")
+def list_job_files_payload(job_dir: str) -> list[dict]:
     source_filename = None
     status_file = os.path.join(job_dir, "status.json")
     if os.path.exists(status_file):
@@ -555,15 +739,58 @@ async def list_job_files(job_id: str, token: str = Depends(verify_token)):
             source_filename = status_data.get("source_filename")
     files = []
     for fname in sorted(os.listdir(job_dir)):
-        # Skip internal tracking files
-        if fname in ("status.json", "output.log"):
+        if fname in ("status.json", "output.log", "batch_results.zip"):
             continue
         if source_filename and fname == source_filename:
             continue
         fpath = os.path.join(job_dir, fname)
         fsize = os.path.getsize(fpath) if os.path.isfile(fpath) else 0
         files.append({"name": fname, "size": fsize})
-    return {"job_id": job_id, "files": files}
+    return files
+
+
+@app.get("/files/{job_id}")
+async def list_job_files(job_id: str, token: str = Depends(verify_token)):
+    job_dir = os.path.join(MARKER_OUTPUT_DIR, job_id)
+    if not os.path.exists(job_dir):
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return {"job_id": job_id, "files": list_job_files_payload(job_dir)}
+
+
+@app.get("/batch/files/{job_id}/{item_id}")
+async def list_batch_item_files(job_id: str, item_id: str, token: str = Depends(verify_token)):
+    item_dir = os.path.join(MARKER_OUTPUT_DIR, job_id, item_id)
+    if not os.path.exists(item_dir):
+        raise HTTPException(status_code=404, detail="Batch item not found.")
+    return {"job_id": job_id, "item_id": item_id, "files": list_job_files_payload(item_dir)}
+
+
+@app.get("/batch/download/{job_id}")
+async def download_batch_results(job_id: str, token: str = Depends(verify_token)):
+    batch_dir = os.path.join(MARKER_OUTPUT_DIR, job_id)
+    status_data = get_status_file_payload(batch_dir)
+    if status_data.get("status") not in {"completed", "completed_with_errors"}:
+        raise HTTPException(status_code=400, detail="Batch job is not completed yet.")
+    zip_path = build_batch_zip(batch_dir)
+    return FileResponse(path=zip_path, filename=f"{job_id}.zip", media_type="application/zip")
+
+
+@app.get("/batch/download/{job_id}/{item_id}")
+async def download_batch_item_result(job_id: str, item_id: str, token: str = Depends(verify_token)):
+    item_dir = os.path.join(MARKER_OUTPUT_DIR, job_id, item_id)
+    status_data = get_status_file_payload(item_dir)
+    if status_data.get("status") != "completed":
+        raise HTTPException(status_code=400, detail="Batch item is not completed yet.")
+    md_file_path = None
+    for file_name in os.listdir(item_dir):
+        if file_name.endswith(".md"):
+            md_file_path = os.path.join(item_dir, file_name)
+            break
+    if not md_file_path or not os.path.exists(md_file_path):
+        raise HTTPException(status_code=500, detail="Generated markdown file not found.")
+    original_filename = status_data.get("original_filename") or item_id
+    download_name = f"{Path(original_filename).stem}.md"
+    return FileResponse(path=md_file_path, filename=download_name, media_type="text/markdown")
 
 
 # ---------------------------------------------------------
