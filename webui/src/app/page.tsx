@@ -441,6 +441,17 @@ export default function Home() {
   };
 
   const busy = status === "uploading" || status === "processing";
+  const batchCompletedCount = batchItems.filter((item) => item.status === "completed").length;
+  const batchFailedCount = batchItems.filter((item) => item.status === "failed").length;
+  const batchProcessingCount = batchItems.filter((item) => item.status === "processing").length;
+  const batchPendingCount = batchItems.filter((item) => item.status === "pending").length;
+
+  const getBatchStatusTone = (itemStatus: string) => {
+    if (itemStatus === "completed") return "text-green-400";
+    if (itemStatus === "failed") return "text-red-400";
+    if (itemStatus === "processing") return "text-amber-400";
+    return "text-zinc-500";
+  };
 
   return (
     <>
@@ -558,12 +569,6 @@ export default function Home() {
                     Download .MD
                   </Button>
                 )}
-                {status === "completed" && isBatchJob && (
-                  <Button size="sm" onClick={handleBatchDownload}
-                    className="h-6 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-100 px-2">
-                    <Download className="w-3 h-3 mr-1" /> Bulk Download ZIP
-                  </Button>
-                )}
               </CardHeader>
               <CardContent className="flex-1 p-0 overflow-hidden">
                 <ScrollArea className="h-full w-full p-4" ref={scrollRef}>
@@ -626,12 +631,28 @@ export default function Home() {
               </Card>
             )}
 
-            {status === "completed" && isBatchJob && batchItems.length > 0 && (
+            {isBatchJob && batchItems.length > 0 && status !== "idle" && status !== "error" && (
               <Card className="bg-zinc-950 border-zinc-800">
-                <CardHeader className="py-2.5 px-4 border-b border-zinc-800">
-                  <CardTitle className="text-xs font-mono text-zinc-500 uppercase tracking-wider flex items-center gap-2">
-                    <FolderOpen className="w-3.5 h-3.5" /> Batch Results ({batchItems.length})
-                  </CardTitle>
+                <CardHeader className="py-2.5 px-4 border-b border-zinc-800 flex flex-row items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <CardTitle className="text-xs font-mono text-zinc-500 uppercase tracking-wider flex items-center gap-2">
+                      <FolderOpen className="w-3.5 h-3.5" /> Batch Results ({batchItems.length})
+                    </CardTitle>
+                    <span className="text-[11px] font-mono text-zinc-500">
+                      <span className="text-green-400">{batchCompletedCount} done</span>
+                      {" • "}
+                      <span className="text-amber-400">{batchProcessingCount} processing</span>
+                      {" • "}
+                      <span className="text-zinc-500">{batchPendingCount} pending</span>
+                      {batchFailedCount > 0 ? <>{" • "}<span className="text-red-400">{batchFailedCount} failed</span></> : null}
+                    </span>
+                  </div>
+                  {status === "completed" && (
+                    <Button size="sm" onClick={handleBatchDownload}
+                      className="h-6 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-100 px-2">
+                      <Download className="w-3 h-3 mr-1" /> Bulk Download ZIP
+                    </Button>
+                  )}
                 </CardHeader>
                 <CardContent className="p-0">
                   <div className="divide-y divide-zinc-900">
@@ -647,7 +668,7 @@ export default function Home() {
                           >
                             <div>
                               <p className="font-mono text-xs text-zinc-200">{item.original_filename}</p>
-                              <p className="mt-1 text-[11px] text-zinc-500">
+                              <p className={`mt-1 text-[11px] ${getBatchStatusTone(item.status)}`}>
                                 {item.status}
                                 {item.artifact_summary?.generated_file_count ? ` • ${item.artifact_summary.generated_file_count} generated files` : ""}
                                 {item.artifact_summary?.image_file_count ? ` • ${item.artifact_summary.image_file_count} images` : ""}
