@@ -16,9 +16,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Marker with full document-format support
-RUN pip install --no-cache-dir 'marker-pdf[full]'
-
 # Copy the API source
 COPY api.py .
 

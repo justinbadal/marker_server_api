@@ -44,13 +44,6 @@ interface Options {
   highres_image_dpi: number;
 }
 
-interface BatchStatusResponse {
-  status: string;
-  total_items: number;
-  completed_items: number;
-  items: BatchItem[];
-}
-
 function fmt(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -147,9 +140,14 @@ function StatusBar({ apiUrl, apiKey }: { apiUrl: string; apiKey: string }) {
   }, [apiUrl, apiKey]);
 
   useEffect(() => {
-    check();
+    const initialId = window.setTimeout(() => {
+      void check();
+    }, 0);
     const id = setInterval(check, 15000);
-    return () => clearInterval(id);
+    return () => {
+      window.clearTimeout(initialId);
+      clearInterval(id);
+    };
   }, [check]);
 
   const online = health?.status === "ok";
