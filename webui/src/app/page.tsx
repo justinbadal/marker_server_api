@@ -221,9 +221,17 @@ function OptionsPanel({ opts, setOpts }: { opts: Options; setOpts: (o: Options) 
             />
           </div>
           <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+            <label className="flex items-center gap-2 cursor-pointer group">
+              <input
+                type="checkbox"
+                checked={!opts.disable_image_extraction}
+                onChange={() => toggleBool("disable_image_extraction")}
+                className="accent-zinc-400"
+              />
+              <span className="text-xs text-zinc-400 group-hover:text-zinc-300">Extract Images</span>
+            </label>
             {([
               ["force_ocr", "Force OCR"],
-              ["disable_image_extraction", "No Images"],
               ["paginate_output", "Paginate Output"],
               ["keep_pageheader_in_output", "Keep Page Headers"],
               ["html_tables_in_markdown", "HTML Tables"],
@@ -281,6 +289,7 @@ export default function Home() {
   const [markdown, setMarkdown] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [jobFiles, setJobFiles] = useState<JobFile[]>([]);
+  const [selectedJobFiles, setSelectedJobFiles] = useState<Set<string>>(new Set());
   const [batchItems, setBatchItems] = useState<BatchItem[]>([]);
   const [isBatchJob, setIsBatchJob] = useState(false);
   const [openItems, setOpenItems] = useState<Record<string, boolean>>({});
@@ -358,6 +367,7 @@ export default function Home() {
     setMarkdown("");
     setErrorMsg("");
     setJobFiles([]);
+    setSelectedJobFiles(new Set());
     setBatchItems([]);
     setOpenItems({});
     const batchMode = files.length > 1;
@@ -404,6 +414,63 @@ export default function Home() {
     const fileBaseName = files[0]?.name ? files[0].name.replace(/\.[^.]+$/, "") : "converted";
     a.href = url; a.download = `${fileBaseName}.md`;
     document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadBlob = async (res: Response, fallbackName: string) => {
+    if (!res.ok) {
+      const message = await res.text();
+      throw new Error(message || "Download failed");
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fallbackName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleJobFilesZipDownload = async (selectedOnly = false) => {
+    if (!jobId || isBatchJob) return;
+    const selected = Array.from(selectedJobFiles);
+    if (selectedOnly && selected.length === 0) return;
+
+    try {
+      const res = await fetch(`${apiUrl}/download/${jobId}/zip`, {
+        method: selectedOnly ? "POST" : "GET",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          ...(selectedOnly ? { "Content-Type": "application/json" } : {}),
+        },
+        body: selectedOnly ? JSON.stringify(selected) : undefined,
+      });
+      await downloadBlob(res, selectedOnly ? `${jobId}-selected.zip` : `${jobId}.zip`);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Download failed");
+    }
+  };
+
+  const toggleJobFileSelection = (fileName: string) => {
+    setSelectedJobFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(fileName)) {
+        next.delete(fileName);
+      } else {
+        next.add(fileName);
+      }
+      return next;
+    });
+  };
+
+  const selectAllJobFiles = () => {
+    setSelectedJobFiles(new Set(jobFiles.map((file) => file.name)));
+  };
+
+  const clearJobFileSelection = () => {
+    setSelectedJobFiles(new Set());
   };
 
   const handleBatchDownload = async () => {
@@ -414,6 +481,7 @@ export default function Home() {
     const a = document.createElement("a");
     a.href = url; a.download = `${jobId}.zip`;
     document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
   };
 
   const handleBatchItemDownload = async (item: BatchItem) => {
@@ -425,6 +493,7 @@ export default function Home() {
     a.href = url;
     a.download = `${item.original_filename.replace(/\.[^.]+$/, "")}.md`;
     document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
   };
 
   const handlePreviewBatchItem = async (item: BatchItem) => {
@@ -443,6 +512,8 @@ export default function Home() {
   const batchFailedCount = batchItems.filter((item) => item.status === "failed").length;
   const batchProcessingCount = batchItems.filter((item) => item.status === "processing").length;
   const batchPendingCount = batchItems.filter((item) => item.status === "pending").length;
+  const selectedJobFileCount = selectedJobFiles.size;
+  const allJobFilesSelected = jobFiles.length > 0 && selectedJobFileCount === jobFiles.length;
 
   const getBatchStatusTone = (itemStatus: string) => {
     if (itemStatus === "completed") return "text-green-400";
@@ -611,20 +682,66 @@ export default function Home() {
             {/* File Listing */}
             {status === "completed" && !isBatchJob && jobFiles.length > 0 && (
               <Card className="bg-zinc-950 border-zinc-800">
-                <CardHeader className="py-2.5 px-4 border-b border-zinc-800">
-                  <CardTitle className="text-xs font-mono text-zinc-500 uppercase tracking-wider flex items-center gap-2">
-                    <File className="w-3.5 h-3.5" /> Extracted Files ({jobFiles.length})
-                  </CardTitle>
+                <CardHeader className="py-2.5 px-4 border-b border-zinc-800 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="space-y-1">
+                    <CardTitle className="text-xs font-mono text-zinc-500 uppercase tracking-wider flex items-center gap-2">
+                      <File className="w-3.5 h-3.5" /> Extracted Files ({jobFiles.length})
+                    </CardTitle>
+                    <p className="text-[11px] font-mono text-zinc-600">
+                      {selectedJobFileCount} selected
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={allJobFilesSelected ? clearJobFileSelection : selectAllJobFiles}
+                      className="h-7 text-xs text-zinc-300 hover:text-zinc-100"
+                    >
+                      {allJobFilesSelected ? "Clear" : "Select All"}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => void handleJobFilesZipDownload(true)}
+                      disabled={selectedJobFileCount === 0}
+                      className="h-7 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-100 disabled:opacity-40"
+                    >
+                      <Download className="w-3 h-3 mr-1" /> Selected ZIP
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => void handleJobFilesZipDownload(false)}
+                      className="h-7 text-xs bg-zinc-100 text-zinc-950 hover:bg-zinc-300"
+                    >
+                      <Download className="w-3 h-3 mr-1" /> All ZIP
+                    </Button>
+                  </div>
                 </CardHeader>
                 <CardContent className="p-0">
                   <div className="divide-y divide-zinc-900">
                     {jobFiles.map(f => (
-                      <div key={f.name} className="flex items-center justify-between px-4 py-2 hover:bg-zinc-900/50 transition-colors">
-                        <span className="font-mono text-xs text-zinc-300 truncate max-w-xs">{f.name}</span>
+                      <label key={f.name} className="flex cursor-pointer items-center justify-between gap-3 px-4 py-2 hover:bg-zinc-900/50 transition-colors">
+                        <span className="flex min-w-0 items-center gap-3">
+                          <input
+                            type="checkbox"
+                            checked={selectedJobFiles.has(f.name)}
+                            onChange={() => toggleJobFileSelection(f.name)}
+                            className="accent-zinc-100"
+                          />
+                          <span className="font-mono text-xs text-zinc-300 truncate">{f.name}</span>
+                        </span>
                         <span className="font-mono text-xs text-zinc-600 shrink-0 ml-4">{fmt(f.size)}</span>
-                      </div>
+                      </label>
                     ))}
                   </div>
+                  {errorMsg && (
+                    <div className="border-t border-zinc-900 px-4 py-2 text-xs text-red-400">
+                      {errorMsg}
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             )}

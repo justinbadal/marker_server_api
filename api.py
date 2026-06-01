@@ -1,3 +1,5 @@
+import base64
+import binascii
 import os
 import subprocess
 import asyncio
@@ -8,7 +10,7 @@ import json
 import re
 import zipfile
 from pathlib import Path, PurePosixPath
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, BackgroundTasks, Body
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -64,6 +66,11 @@ def env_flag(name: str, default: bool = False) -> bool:
 
 
 SYNOLOGY_SSH_AUTO_ADD_HOST_KEY = env_flag("SYNOLOGY_SSH_AUTO_ADD_HOST_KEY", False)
+MARKER_OUTPUT_IMAGE_FORMAT = os.getenv("MARKER_OUTPUT_IMAGE_FORMAT", "PNG")
+DATA_URI_IMAGE_PATTERN = re.compile(
+    r"data:image/(?P<format>[a-zA-Z0-9.+-]+);base64,(?P<data>[A-Za-z0-9+/=\r\n]+)",
+    re.IGNORECASE,
+)
 
 # Ensure the base output directory exists on startup
 os.makedirs(MARKER_OUTPUT_DIR, exist_ok=True)
@@ -147,18 +154,120 @@ def append_job_log(log_file_path: str, message: str):
 
 
 def collect_generated_files(job_dir: str, source_filename: str | None = None) -> list[str]:
-    internal_names = {"status.json", "output.log"}
+    internal_names = {"status.json", "output.log", "marker_config.json"}
     generated_files = []
     for path in sorted(Path(job_dir).rglob("*")):
         if not path.is_file():
             continue
         if path.name in internal_names:
             continue
+        if path.name.startswith("selected_results_") and path.suffix == ".zip":
+            continue
         relative_path = path.relative_to(job_dir).as_posix()
         if source_filename and relative_path == source_filename:
             continue
         generated_files.append(str(path))
     return generated_files
+
+
+def image_format_extension(image_format: str) -> str:
+    normalized = image_format.lower().split("+", 1)[0]
+    if normalized == "jpeg":
+        return "jpg"
+    if normalized in {"png", "jpg", "webp", "gif", "bmp", "tif", "tiff", "svg"}:
+        return normalized
+    return "bin"
+
+
+def externalize_markdown_data_images(job_dir: str, log_file_path: str | None = None) -> int:
+    images_dir = Path(job_dir) / "images"
+    extracted_count = 0
+
+    for markdown_path in sorted(Path(job_dir).rglob("*.md")):
+        text = markdown_path.read_text(encoding="utf-8")
+
+        def replace_data_uri(match: re.Match) -> str:
+            nonlocal extracted_count
+            image_format = match.group("format")
+            encoded = re.sub(r"\s+", "", match.group("data"))
+            try:
+                image_bytes = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError):
+                return match.group(0)
+
+            extracted_count += 1
+            extension = image_format_extension(image_format)
+            images_dir.mkdir(exist_ok=True)
+            image_name = f"embedded-{extracted_count:03d}.{extension}"
+            image_path = images_dir / image_name
+            while image_path.exists():
+                extracted_count += 1
+                image_name = f"embedded-{extracted_count:03d}.{extension}"
+                image_path = images_dir / image_name
+            image_path.write_bytes(image_bytes)
+            return Path(os.path.relpath(image_path, markdown_path.parent)).as_posix()
+
+        rewritten = DATA_URI_IMAGE_PATTERN.sub(replace_data_uri, text)
+        if rewritten != text:
+            markdown_path.write_text(rewritten, encoding="utf-8")
+
+    if extracted_count and log_file_path:
+        append_job_log(log_file_path, f"[images] Externalized {extracted_count} embedded base64 image(s) to images/.")
+    return extracted_count
+
+
+def write_marker_config(input_path: str, extras: dict | None = None) -> str:
+    extras = extras or {}
+    config = {
+        "image_extraction_mode": "highres",
+        "extract_images": not bool(extras.get("disable_image_extraction")),
+    }
+    config_path = Path(input_path).parent / "marker_config.json"
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    return str(config_path)
+
+
+def get_generated_file_entries(job_dir: str) -> list[dict]:
+    source_filename = None
+    status_file = os.path.join(job_dir, "status.json")
+    if os.path.exists(status_file):
+        with open(status_file, "r", encoding="utf-8") as f:
+            status_data = json.load(f)
+            source_filename = status_data.get("source_filename")
+
+    files = []
+    for file_path in collect_generated_files(job_dir, source_filename):
+        relative_path = Path(file_path).relative_to(job_dir).as_posix()
+        files.append({"name": relative_path, "size": os.path.getsize(file_path)})
+    return files
+
+
+def resolve_generated_file_paths(job_dir: str, selected_files: list[str] | None = None) -> list[tuple[str, str]]:
+    available = {
+        entry["name"]: os.path.join(job_dir, *PurePosixPath(entry["name"]).parts)
+        for entry in get_generated_file_entries(job_dir)
+    }
+    if selected_files:
+        invalid = [name for name in selected_files if name not in available]
+        if invalid:
+            raise HTTPException(status_code=400, detail=f"Unknown generated file(s): {', '.join(invalid[:5])}")
+        names = selected_files
+    else:
+        names = sorted(available)
+
+    if not names:
+        raise HTTPException(status_code=404, detail="No generated files found.")
+
+    return [(name, available[name]) for name in names]
+
+
+def build_job_files_zip(job_dir: str, selected_files: list[str] | None = None) -> str:
+    file_paths = resolve_generated_file_paths(job_dir, selected_files)
+    zip_path = os.path.join(job_dir, f"selected_results_{uuid.uuid4().hex[:8]}.zip")
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for archive_name, file_path in file_paths:
+            archive.write(file_path, archive_name)
+    return zip_path
 
 
 def summarize_generated_files(job_dir: str, extras: dict | None = None, source_filename: str | None = None) -> dict:
@@ -299,11 +408,13 @@ def upload_generated_files_to_synology(
             pass
 
 def get_marker_cmd(input_path: str, output_dir: str, extras: dict = None):
+    config_path = write_marker_config(input_path, extras)
     cmd = [
         "marker_single",
         input_path,
         "--output_dir", output_dir,
         "--output_format", "markdown",
+        "--config_json", config_path,
         "--use_llm",
         "--llm_service", "marker.services.openai.OpenAIService",
         "--openai_model", OPENAI_MODEL,
@@ -348,6 +459,7 @@ def get_run_env():
     run_env["XDG_CACHE_HOME"] = "/root/.cache"
     run_env["TORCH_HOME"] = "/root/.cache/torch"
     run_env["SURYA_CACHE_DIR"] = os.path.join(cache_base, "surya")
+    run_env["OUTPUT_IMAGE_FORMAT"] = MARKER_OUTPUT_IMAGE_FORMAT
     return run_env
 
 def update_job_status(job_dir: str, status: str, error: str = None):
@@ -436,6 +548,7 @@ def run_single_conversion_job(original_base_name: str, input_path: str, job_dir:
 
         update_job_status(job_dir, "completed")
         source_filename = Path(input_path).name
+        externalize_markdown_data_images(job_dir, log_file_path)
         nas_upload = upload_generated_files_to_synology(job_dir, original_base_name, log_file_path, source_filename)
         finalize_job_metadata(job_dir, extras, nas_upload, source_filename)
         return {
@@ -731,22 +844,7 @@ async def download_result(job_id: str, token: str = Depends(verify_token)):
 
 
 def list_job_files_payload(job_dir: str) -> list[dict]:
-    source_filename = None
-    status_file = os.path.join(job_dir, "status.json")
-    if os.path.exists(status_file):
-        with open(status_file, "r", encoding="utf-8") as f:
-            status_data = json.load(f)
-            source_filename = status_data.get("source_filename")
-    files = []
-    for fname in sorted(os.listdir(job_dir)):
-        if fname in ("status.json", "output.log", "batch_results.zip"):
-            continue
-        if source_filename and fname == source_filename:
-            continue
-        fpath = os.path.join(job_dir, fname)
-        fsize = os.path.getsize(fpath) if os.path.isfile(fpath) else 0
-        files.append({"name": fname, "size": fsize})
-    return files
+    return get_generated_file_entries(job_dir)
 
 
 @app.get("/files/{job_id}")
@@ -755,6 +853,38 @@ async def list_job_files(job_id: str, token: str = Depends(verify_token)):
     if not os.path.exists(job_dir):
         raise HTTPException(status_code=404, detail="Job not found.")
     return {"job_id": job_id, "files": list_job_files_payload(job_dir)}
+
+
+@app.get("/download/{job_id}/zip")
+async def download_job_files_zip(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    token: str = Depends(verify_token),
+):
+    job_dir = os.path.join(MARKER_OUTPUT_DIR, job_id)
+    status_data = get_status_file_payload(job_dir)
+    if status_data.get("status") != "completed":
+        raise HTTPException(status_code=400, detail="Job is not completed yet.")
+    zip_path = build_job_files_zip(job_dir)
+    background_tasks.add_task(os.remove, zip_path)
+    return FileResponse(path=zip_path, filename=f"{job_id}.zip", media_type="application/zip")
+
+
+@app.post("/download/{job_id}/zip")
+async def download_selected_job_files_zip(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    files: list[str] = Body(default_factory=list),
+    token: str = Depends(verify_token),
+):
+    job_dir = os.path.join(MARKER_OUTPUT_DIR, job_id)
+    status_data = get_status_file_payload(job_dir)
+    if status_data.get("status") != "completed":
+        raise HTTPException(status_code=400, detail="Job is not completed yet.")
+    zip_path = build_job_files_zip(job_dir, files)
+    download_name = f"{job_id}-selected.zip" if files else f"{job_id}.zip"
+    background_tasks.add_task(os.remove, zip_path)
+    return FileResponse(path=zip_path, filename=download_name, media_type="application/zip")
 
 
 @app.get("/batch/files/{job_id}/{item_id}")
@@ -850,6 +980,7 @@ async def convert_stream(
                 log_file_path = os.path.join(hit_output_dir, "output.log")
                 with open(log_file_path, "a", encoding="utf-8"):
                     pass
+                externalize_markdown_data_images(hit_output_dir, log_file_path)
                 nas_upload = upload_generated_files_to_synology(hit_output_dir, original_base_name, log_file_path)
                 for file_name in os.listdir(hit_output_dir):
                     if file_name.endswith(".md"):
@@ -903,6 +1034,7 @@ async def convert_pdf(
         if os.path.exists(hit_output_dir):
             with open(log_file_path, "a", encoding="utf-8"):
                 pass
+            externalize_markdown_data_images(hit_output_dir, log_file_path)
             upload_generated_files_to_synology(hit_output_dir, original_base_name, log_file_path)
         
         md_file_path = None
