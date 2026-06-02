@@ -153,6 +153,17 @@ def append_job_log(log_file_path: str, message: str):
         log_file.write(f"{message}\n")
 
 
+def redact_synology_log_value(value) -> str:
+    text = str(value)
+    if SYNOLOGY_SSH_HOST:
+        text = text.replace(SYNOLOGY_SSH_HOST, "[redacted-synology-host]")
+    return re.sub(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?![\w.])", "[redacted-ip]", text)
+
+
+def append_synology_job_log(log_file_path: str, message: str):
+    append_job_log(log_file_path, redact_synology_log_value(message))
+
+
 def collect_generated_files(job_dir: str, source_filename: str | None = None) -> list[str]:
     internal_names = {"status.json", "output.log", "marker_config.json"}
     generated_files = []
@@ -328,7 +339,7 @@ def upload_generated_files_to_synology(
     source_filename: str | None = None,
 ) -> dict:
     if not synology_ssh_enabled():
-        append_job_log(log_file_path, "[nas] Synology SSH upload skipped: integration is not fully configured.")
+        append_synology_job_log(log_file_path, "[nas] Synology SSH upload skipped: integration is not fully configured.")
         return {
             "enabled": False,
             "status": "skipped",
@@ -341,7 +352,7 @@ def upload_generated_files_to_synology(
     target_dir = build_synology_target_dir(original_base_name)
     generated_files = collect_generated_files(job_dir, source_filename)
     if not generated_files:
-        append_job_log(log_file_path, "[nas] No generated files found to upload.")
+        append_synology_job_log(log_file_path, "[nas] No generated files found to upload.")
         return {
             "enabled": True,
             "status": "skipped",
@@ -355,21 +366,21 @@ def upload_generated_files_to_synology(
     ssh = None
     sftp = None
     try:
-        append_job_log(log_file_path, f"[nas] Connecting to Synology over SSH at {SYNOLOGY_SSH_HOST}:{SYNOLOGY_SSH_PORT}")
+        append_synology_job_log(log_file_path, "[nas] Connecting to Synology over SSH.")
         ssh = create_ssh_client()
         sftp = ssh.open_sftp()
         ensure_remote_dir(sftp, target_dir)
-        append_job_log(log_file_path, f"[nas] Upload target: {target_dir}")
+        append_synology_job_log(log_file_path, f"[nas] Upload target: {target_dir}")
 
         for local_file_path in generated_files:
             relative_path = Path(local_file_path).relative_to(job_dir).as_posix()
             remote_file_path = PurePosixPath(target_dir) / PurePosixPath(relative_path)
             ensure_remote_dir(sftp, remote_file_path.parent.as_posix())
-            append_job_log(log_file_path, f"[nas] Uploading {relative_path} -> {remote_file_path.as_posix()}")
+            append_synology_job_log(log_file_path, f"[nas] Uploading {relative_path} -> {remote_file_path.as_posix()}")
             sftp.put(local_file_path, remote_file_path.as_posix())
             uploaded_files.append(relative_path)
 
-        append_job_log(log_file_path, f"[nas] Uploaded {len(uploaded_files)} file(s) to Synology over SSH.")
+        append_synology_job_log(log_file_path, f"[nas] Uploaded {len(uploaded_files)} file(s) to Synology over SSH.")
         images_uploaded = len(
             [path for path in uploaded_files if Path(path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}]
         )
@@ -382,14 +393,14 @@ def upload_generated_files_to_synology(
             "images_uploaded": images_uploaded,
         }
     except Exception as exc:
-        append_job_log(log_file_path, f"[nas] Upload failed: {exc}")
+        append_synology_job_log(log_file_path, f"[nas] Upload failed: {exc}")
         images_uploaded = len(
             [path for path in uploaded_files if Path(path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}]
         )
         return {
             "enabled": True,
             "status": "failed",
-            "error": str(exc),
+            "error": redact_synology_log_value(exc),
             "uploaded_files": uploaded_files,
             "uploaded_file_count": len(uploaded_files),
             "target_dir": target_dir,
