@@ -451,7 +451,7 @@ def get_marker_cmd(input_path: str, output_dir: str, extras: dict = None):
 
 def get_run_env():
     run_env = os.environ.copy()
-    run_env["TORCH_DEVICE"] = "cuda"
+    run_env["TORCH_DEVICE"] = os.getenv("MARKER_TORCH_DEVICE", "cuda")
     run_env["CUDA_VISIBLE_DEVICES"] = "0"
     
     # AGGRESSIVE CACHE REDIRECTION

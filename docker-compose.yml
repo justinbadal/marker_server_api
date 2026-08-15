@@ -11,12 +11,24 @@ services:
       - ${HOST_MODEL_CACHE_DIR:-C:/Users/Justin/.cache}:/root/.cache
       - ${SYNOLOGY_SSH_KEY_SOURCE:-C:/coding/marker_server_api_synology_key}:/run/secrets/marker_server_api_synology_key:ro
       - ${SYNOLOGY_SSH_KNOWN_HOSTS_SOURCE:-C:/coding/marker_server_api_synology_known_hosts}:/run/secrets/marker_server_api_synology_known_hosts:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - host.docker.internal:host-gateway
     environment:
       - MARKER_OUTPUT_DIR=/app/output
+      - MARKER_TORCH_DEVICE=cpu
       - HF_HOME=/root/.cache
       - HF_HUB_DISABLE_SYMLINKS=1
       - HF_HUB_CACHE=/root/.cache/hub
       - TRANSFORMERS_CACHE=/root/.cache/hub
+      - NVIDIA_VISIBLE_DEVICES=0
+      - SURYA_INFERENCE_BACKEND=vllm
+      - SURYA_INFERENCE_HOST=host.docker.internal
+      - SURYA_INFERENCE_KEEP_ALIVE=true
+      - VLLM_GPUS=0
+      - VLLM_GPU_TYPE=5090
+      - VLLM_DOCKER_IMAGE=vllm/vllm-openai:v0.20.1
+      - DOCKER_HF_CACHE_PATH=/home/justin/Docker/_data/huggingface-cache
     env_file:
       - .env
     # REQUIRED on Windows/WSL2 or Linux for GPU passthrough:
