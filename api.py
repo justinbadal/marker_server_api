@@ -22,7 +22,7 @@ MARKER_OUTPUT_DIR = os.getenv("MARKER_OUTPUT_DIR", r"C:\coding\marker_output")
 API_BEARER_TOKEN = os.getenv("MARKER_API_TOKEN", "my-secret-token")  # Change token in production!
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:8020/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "openai/gpt-oss-20b")
-MAX_BATCH_CONCURRENCY = int(os.getenv("MARKER_BATCH_CONCURRENCY", "4"))
+MAX_BATCH_CONCURRENCY = int(os.getenv("MARKER_BATCH_CONCURRENCY", "1"))
 SUPPORTED_UPLOAD_EXTENSIONS = [
     ".pdf",
     ".png",
@@ -230,9 +230,33 @@ def externalize_markdown_data_images(job_dir: str, log_file_path: str | None = N
 def write_marker_config(input_path: str, extras: dict | None = None) -> str:
     extras = extras or {}
     config = {
+        # Marker 2 configuration is passed to the Python API by marker_runner.
         "image_extraction_mode": "highres",
         "extract_images": not bool(extras.get("disable_image_extraction")),
+        "use_llm": True,
+        "openai_model": OPENAI_MODEL,
+        "openai_base_url": OPENAI_BASE_URL,
+        "openai_api_key": os.getenv("OPENAI_API_KEY", "SK-1234567890HERPDERP"),
+        "openai_image_format": "png",
+        "mode": os.getenv("MARKER_MODE", "balanced"),
+        # Limit per-document LLM processor fan-out; batch jobs are serialized
+        # by default below to avoid loading multiple VLM workers on GPU 0.
+        "max_concurrency": int(extras.get("max_concurrency") or MAX_BATCH_CONCURRENCY),
+        "redo_inline_math": True,
+        "keep_pagefooter_in_output": True,
     }
+    for key in (
+        "page_range",
+        "force_ocr",
+        "paginate_output",
+        "keep_pageheader_in_output",
+        "html_tables_in_markdown",
+        "disable_links",
+        "strip_existing_ocr",
+        "highres_image_dpi",
+    ):
+        if extras.get(key) not in (None, "", False):
+            config[key] = extras[key]
     config_path = Path(input_path).parent / "marker_config.json"
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     return str(config_path)
@@ -420,40 +444,10 @@ def upload_generated_files_to_synology(
 
 def get_marker_cmd(input_path: str, output_dir: str, extras: dict = None):
     config_path = write_marker_config(input_path, extras)
-    cmd = [
-        "marker_single",
-        input_path,
-        "--output_dir", output_dir,
-        "--output_format", "markdown",
-        "--config_json", config_path,
-        "--use_llm",
-        "--llm_service", "marker.services.openai.OpenAIService",
-        "--openai_model", OPENAI_MODEL,
-        "--openai_base_url", OPENAI_BASE_URL,
-        "--openai_api_key", "SK-1234567890HERPDERP",
-        "--openai_image_format", "png",
-        "--layout_batch_size", "16",
-        "--detection_batch_size", "16",
-        "--recognition_batch_size", "16",
-        "--equation_batch_size", "8",
-        "--table_rec_batch_size", "8",
-        "--max_concurrency", "4",
-        "--redo_inline_math",
-        "--keep_pagefooter_in_output"
-    ]
-    # Append any extra options from the UI
-    if extras:
-        if extras.get("page_range"): cmd += ["--page_range", extras["page_range"]]
-        if extras.get("force_ocr"): cmd += ["--force_ocr"]
-        if extras.get("disable_image_extraction"): cmd += ["--disable_image_extraction"]
-        if extras.get("paginate_output"): cmd += ["--paginate_output"]
-        if extras.get("keep_pageheader_in_output"): cmd += ["--keep_pageheader_in_output"]
-        if extras.get("html_tables_in_markdown"): cmd += ["--html_tables_in_markdown"]
-        if extras.get("disable_links"): cmd += ["--disable_links"]
-        if extras.get("strip_existing_ocr"): cmd += ["--strip_existing_ocr"]
-        if extras.get("max_concurrency"): cmd += ["--max_concurrency", str(extras["max_concurrency"])]
-        if extras.get("highres_image_dpi"): cmd += ["--highres_image_dpi", str(extras["highres_image_dpi"])]
-    return cmd
+    # Marker 2.0.0's stock CLI omits several documented options, including
+    # use_llm.  marker_runner passes the OpenAI-compatible service explicitly
+    # through PdfConverter instead of relying on the incomplete CLI surface.
+    return ["python", "/app/marker_runner.py", input_path, output_dir, config_path]
 
 def get_run_env():
     run_env = os.environ.copy()
@@ -471,6 +465,7 @@ def get_run_env():
     run_env["TORCH_HOME"] = "/root/.cache/torch"
     run_env["SURYA_CACHE_DIR"] = os.path.join(cache_base, "surya")
     run_env["OUTPUT_IMAGE_FORMAT"] = MARKER_OUTPUT_IMAGE_FORMAT
+    run_env["PYTHONUNBUFFERED"] = "1"
     return run_env
 
 def update_job_status(job_dir: str, status: str, error: str = None):

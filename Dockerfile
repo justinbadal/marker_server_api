@@ -17,7 +17,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the API source
-COPY api.py .
+COPY api.py marker_runner.py ./
 
 # Setup environment defaults targeted towards Docker contexts
 ENV MARKER_OUTPUT_DIR=/app/output
